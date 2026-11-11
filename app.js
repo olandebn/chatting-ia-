@@ -805,12 +805,14 @@ async function viewAdmin(main) {
   const whOk = wh && !wh.error && wh.url && wh.url.includes("/functions/v1/telegram-webhook");
   main.innerHTML = `${head("Administration", "Configuration de la plateforme et gestion des clients.")}
   <section class="panel">
-    <div class="panel-head"><div><h2>Configuration</h2><p>Le bot Telegram partagé par tous les clients et la clé Claude qui rédige les réponses.</p></div></div>
+    <div class="panel-head"><div><h2>Configuration</h2><p>Le bot Telegram partagé, le fournisseur IA et son modèle.</p></div></div>
     <div class="row" style="margin-bottom:16px">
       <span class="tag ${st.has_token ? "ok" : "bad"}">Bot ${st.bot_username ? "@" + esc(st.bot_username) : "non configuré"}</span>
       <span class="tag ${whOk ? "ok" : "bad"}">Webhook ${whOk ? "actif" : "inactif"}</span>
       <span class="tag ${st.has_anthropic_key ? "ok" : "bad"}">Clé Claude ${st.has_anthropic_key ? "enregistrée" : "manquante"}</span>
-      <span class="tag">Modèle ${esc(st.model ?? "")}</span>
+      <span class="tag">Moteur ${st.ai_provider === "openai" ? "OpenAI" : "Claude"}</span>
+      <span class="tag ${st.has_openai_key ? "ok" : "warn"}">Clé OpenAI ${st.has_openai_key ? "présente" : "absente"}</span>
+      <span class="tag">Modèle ${esc(st.ai_provider === "openai" ? st.openai_model : st.model)}</span>
       ${wh?.pending_update_count ? `<span class="tag warn">${wh.pending_update_count} mises à jour en attente</span>` : ""}
     </div>
     ${wh?.last_error_message ? `<div class="mode-banner" style="background:#f8e1e1;margin:0 0 16px">Dernière erreur Telegram : ${esc(wh.last_error_message)}</div>` : ""}
@@ -820,7 +822,15 @@ async function viewAdmin(main) {
       <div class="field"><label for="akey">Clé API Anthropic</label><input id="akey" type="password" autocomplete="off" placeholder="${st.has_anthropic_key ? "Enregistrée, laisse vide pour la garder" : "sk-ant-…"}">
         <p class="hint">À créer sur console.anthropic.com. Elle est testée avant d'être enregistrée.</p></div>
       <div class="field"><label for="model">Modèle Claude</label><input id="model" type="text" value="${esc(st.model ?? "claude-haiku-5-5")}">
-        <p class="hint">claude-haiku-5-5 est rapide et économique ; claude-sonnet-5-5 écrit mieux mais coûte plus cher.</p></div>
+      <p class="hint">Conservé comme alternative à OpenAI.</p></div>
+      <div class="field"><label for="provider">Moteur IA actif</label><select id="provider">
+      <option value="anthropic" ${st.ai_provider !== "openai" ? "selected" : ""}>Claude — Anthropic</option>
+      <option value="openai" ${st.ai_provider === "openai" ? "selected" : ""}>OpenAI — GPT</option>
+      </select><p class="hint">Global : s'applique à tous les utilisateurs de Relais IA.</p></div>
+      <div class="field"><label for="openai-model">Modèle OpenAI</label><select id="openai-model">
+      <option value="gpt-5.4-mini" ${st.openai_model !== "gpt-5.4" ? "selected" : ""}>GPT-5.4 mini — économique</option>
+      <option value="gpt-5.4" ${st.openai_model === "gpt-5.4" ? "selected" : ""}>GPT-5.4 — plus performant</option>
+      </select><p class="hint">La clé OpenAI doit être ajoutée dans Supabase → Edge Functions → Secrets sous OPENAI_API_KEY. Ne la saisis jamais dans GitHub Pages.</p></div>
       <div style="align-self:end;margin-bottom:14px"><button class="btn-primary" type="submit">Enregistrer la configuration</button></div>
     </form>
   </section>
@@ -859,6 +869,8 @@ async function viewAdmin(main) {
     if ($("#tok").value.trim()) body.telegram_bot_token = $("#tok").value.trim();
     if ($("#akey").value.trim()) body.anthropic_api_key = $("#akey").value.trim();
     if ($("#model").value.trim() && $("#model").value.trim() !== st.model) body.anthropic_model = $("#model").value.trim();
+    if ($("#provider").value !== (st.ai_provider || "anthropic")) body.ai_provider = $("#provider").value;
+    if ($("#openai-model").value !== (st.openai_model || "gpt-5.4-mini")) body.openai_model = $("#openai-model").value;
     if (!Object.keys(body).length) { btn.disabled = false; return toast("Rien à enregistrer."); }
     try { const r = await api("admin_save", body); toast(r.bot_username ? `Bot @${r.bot_username} connecté` : "Configuration enregistrée"); state.overview = null; render(); }
     catch (err) { fail(err); btn.disabled = false; }
