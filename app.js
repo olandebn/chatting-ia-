@@ -418,7 +418,26 @@ async function saveSettings(patch, msg = "Réglages enregistrés") {
 
 async function viewControl(main) {
   const s = state.settings;
+  const canSetAiEngine = !!state.overview?.profile?.is_admin;
+  const aiEngineStatus = canSetAiEngine
+    ? await api("admin_status").catch((e) => ({ error: String(e?.message || e) }))
+    : null;
   main.innerHTML = `${head("Contrôle IA", "Choisis comment et quand ton assistant intervient.")}
+  ${canSetAiEngine ? `<section class="panel">
+    <div class="panel-head"><div><h2>Moteur IA</h2><p>Choisis le fournisseur utilisé pour les réponses Telegram. Ce réglage est global.</p></div></div>
+    ${aiEngineStatus?.error ? `<p class="hint">Impossible de charger la configuration : ${esc(aiEngineStatus.error)}</p>` : `
+      <form id="ctrl-notrack-form" class="row" style="align-items:end;gap:12px">
+        <div class="grow"><label for="ctrl-notrack-provider">Fournisseur IA</label>
+          <select id="ctrl-notrack-provider">
+            <option value="openai" ${aiEngineStatus?.ai_provider === "openai" ? "selected" : ""}>OpenAI — API payante</option>
+            <option value="notrack" ${aiEngineStatus?.ai_provider === "notrack" ? "selected" : ""}>NoTrack — API avec crédit d’essai</option>
+            <option value="anthropic" ${!aiEngineStatus?.ai_provider || aiEngineStatus.ai_provider === "anthropic" ? "selected" : ""}>Claude — API payante</option>
+          </select>
+        </div>
+        <button type="submit" class="btn-primary">Enregistrer le moteur</button>
+      </form>
+      <p class="hint" style="margin-top:8px">Clé NoTrack : ${aiEngineStatus?.has_notrack_key ? "présente" : "absente"}. À enregistrer côté Supabase sous NOTRACK_API_KEY. Le chat Web gratuit NoTrack n'est pas l'API Telegram.</p>`}
+  </section>` : ""}
   <section class="panel">
     <div class="panel-head"><div><h2>Mode de réponse</h2><p>Appliqué aux discussions en cours et aux nouvelles discussions.</p></div></div>
     ${lever(s.mode)}
@@ -454,6 +473,17 @@ async function viewControl(main) {
     <button class="btn-primary" id="persona-save">Enregistrer la présentation</button>
   </section>`;
 
+  if (canSetAiEngine && !aiEngineStatus?.error) {
+    $("#ctrl-notrack-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const button = $("#ctrl-notrack-form button");
+      const provider = $("#ctrl-notrack-provider").value;
+      if (provider === (aiEngineStatus.ai_provider || "anthropic")) return toast("Moteur déjà enregistré");
+      button.disabled = true;
+      try { await api("admin_save", { ai_provider: provider }); toast("Moteur enregistré"); await render(); }
+      catch (err) { fail(err); button.disabled = false; }
+    });
+  }
   bindLever($("#lever"), async (m) => {
     setMode(m);
     $("#mode-banner").textContent = MODES[m].banner;
@@ -810,9 +840,10 @@ async function viewAdmin(main) {
       <span class="tag ${st.has_token ? "ok" : "bad"}">Bot ${st.bot_username ? "@" + esc(st.bot_username) : "non configuré"}</span>
       <span class="tag ${whOk ? "ok" : "bad"}">Webhook ${whOk ? "actif" : "inactif"}</span>
       <span class="tag ${st.has_anthropic_key ? "ok" : "bad"}">Clé Claude ${st.has_anthropic_key ? "enregistrée" : "manquante"}</span>
-      <span class="tag">Moteur ${st.ai_provider === "openai" ? "OpenAI" : "Claude"}</span>
+      <span class="tag">Moteur ${st.ai_provider === "notrack" ? "NoTrack" : st.ai_provider === "openai" ? "OpenAI" : "Claude"}</span>
       <span class="tag ${st.has_openai_key ? "ok" : "warn"}">Clé OpenAI ${st.has_openai_key ? "présente" : "absente"}</span>
-      <span class="tag">Modèle ${esc(st.ai_provider === "openai" ? st.openai_model : st.model)}</span>
+      <span class="tag ${st.has_notrack_key ? "ok" : "warn"}">Clé NoTrack ${st.has_notrack_key ? "présente" : "absente"}</span>
+      <span class="tag">Modèle ${esc(st.ai_provider === "notrack" ? "notrack-uncensored" : st.ai_provider === "openai" ? st.openai_model : st.model)}</span>
       ${wh?.pending_update_count ? `<span class="tag warn">${wh.pending_update_count} mises à jour en attente</span>` : ""}
     </div>
     ${wh?.last_error_message ? `<div class="mode-banner" style="background:#f8e1e1;margin:0 0 16px">Dernière erreur Telegram : ${esc(wh.last_error_message)}</div>` : ""}
@@ -824,13 +855,15 @@ async function viewAdmin(main) {
       <div class="field"><label for="model">Modèle Claude</label><input id="model" type="text" value="${esc(st.model ?? "claude-haiku-5-5")}">
       <p class="hint">Conservé comme alternative à OpenAI.</p></div>
       <div class="field"><label for="provider">Moteur IA actif</label><select id="provider">
-      <option value="anthropic" ${st.ai_provider !== "openai" ? "selected" : ""}>Claude — Anthropic</option>
+      <option value="anthropic" ${(!st.ai_provider || st.ai_provider === "anthropic") ? "selected" : ""}>Claude — Anthropic</option>
       <option value="openai" ${st.ai_provider === "openai" ? "selected" : ""}>OpenAI — GPT</option>
+      <option value="notrack" ${st.ai_provider === "notrack" ? "selected" : ""}>NoTrack — API</option>
       </select><p class="hint">Global : s'applique à tous les utilisateurs de Relais IA.</p></div>
       <div class="field"><label for="openai-model">Modèle OpenAI</label><select id="openai-model">
       <option value="gpt-5.4-mini" ${st.openai_model !== "gpt-5.4" ? "selected" : ""}>GPT-5.4 mini — économique</option>
       <option value="gpt-5.4" ${st.openai_model === "gpt-5.4" ? "selected" : ""}>GPT-5.4 — plus performant</option>
       </select><p class="hint">La clé OpenAI doit être ajoutée dans Supabase → Edge Functions → Secrets sous OPENAI_API_KEY. Ne la saisis jamais dans GitHub Pages.</p></div>
+      <p class="hint">NoTrack : clé API dans Supabase → Edge Functions → Secrets sous NOTRACK_API_KEY. Pas dans GitHub. Le chat web NoTrack gratuit est distinct de son API.</p>
       <div style="align-self:end;margin-bottom:14px"><button class="btn-primary" type="submit">Enregistrer la configuration</button></div>
     </form>
   </section>
