@@ -41,10 +41,33 @@ Deno.serve(async (req) => {
       }
 
       // ----- Discussions -----
+      // RELAIS_V2_20261112 : commandes fiables et limitées au propriétaire authentifié.
+      case "resume_ai": {
+        const a=await loadAccount(uid);
+        if (!a) return json({error:'Compte introuvable'},404);
+        await db.from('bot_settings').update({ai_paused_reason:null,ai_paused_at:null}).eq('user_id',uid);
+        return json({ok:true});
+      }
+      case "retry_failed": {
+        const rid=Number(body.reply_id);
+        if (!Number.isSafeInteger(rid)) return json({error:'Réponse invalide'},400);
+        const {data:r}=await db.from('replies').select('id,chat_id,status').eq('id',rid).eq('user_id',uid).maybeSingle();
+        if (!r || r.status!=='failed') return json({error:'Réponse non éligible au nouvel essai'},409);
+        const a=await loadAccount(uid);
+        if (!a || a.settings?.ai_paused_reason) return json({error:'Compte en pause, corrige le problème avant de reprendre'},409);
+        const {data:other}=await db.from('replies').select('id').eq('chat_id',r.chat_id)
+          .in('status',['scheduled','generating']).limit(1);
+        if (other?.length) return json({error:'Réponse déjà programmée dans cette discussion'},409);
+        const {error}=await db.from('replies').update({status:'scheduled',due_at:new Date().toISOString(),error:null})
+          .eq('id',rid).eq('user_id',uid).eq('status','failed');
+        if (error) return json({error:'Réessai impossible : '+error.message},409);
+        return json({ok:true});
+      }
       case "clear_chat_memory": {
         const { data: chat } = await db.from("chats").select("id").eq("id", body.chat_id).eq("user_id", uid).maybeSingle();
         if (!chat) return json({ error: "Discussion introuvable" }, 404);
         await db.from("messages").delete().eq("chat_id", chat.id);
+        await db.from('contact_memory').delete().eq('user_id',uid).eq('chat_id',chat.id);
         await db.from("replies").update({ status: "cancelled" }).eq("chat_id", chat.id).in("status", ["scheduled", "draft"]);
         return json({ ok: true });
       }
@@ -96,6 +119,10 @@ Deno.serve(async (req) => {
           has_token: !!token,
           has_anthropic_key: !!(await cfg("anthropic_api_key")),
           model: await cfg("anthropic_model"),
+          ai_provider: (await cfg("ai_provider")) || "anthropic",
+          has_openai_key: !!Deno.env.get("OPENAI_API_KEY"),
+          openai_model: (await cfg("openai_model")) || "gpt-5.4-mini",
+          has_notrack_key: !!Deno.env.get("NOTRACK_API_KEY"),
           webhook,
         });
       }
@@ -118,6 +145,26 @@ Deno.serve(async (req) => {
           out.anthropic = "ok";
         }
         if (body.anthropic_model) { await setCfg("anthropic_model", String(body.anthropic_model).trim()); out.model = "ok"; }
+        if (body.openai_model) {
+          const model = String(body.openai_model).trim();
+          if (!["gpt-5.4-mini", "gpt-5.4"].includes(model))
+            return json({ error: "Modèle OpenAI non autorisé" }, 400);
+          await setCfg("openai_model", model);
+          out.openai_model = "ok";
+        }
+        if (body.ai_provider) {
+          const provider = String(body.ai_provider).trim();
+          if (!["anthropic", "openai", "notrack"].includes(provider))
+            return json({ error: "Fournisseur IA inconnu" }, 400);
+          if (provider === "openai" && !Deno.env.get("OPENAI_API_KEY"))
+            return json({ error: "Définis d'abord OPENAI_API_KEY dans les secrets Supabase Edge Functions" }, 400);
+          if (provider === "notrack" && !Deno.env.get("NOTRACK_API_KEY"))
+            return json({ error: "Ajoute NOTRACK_API_KEY dans Supabase Edge Functions → Secrets" }, 400);
+          if (provider === "anthropic" && !(await cfg("anthropic_api_key")))
+            return json({ error: "Aucune clé Anthropic configurée" }, 400);
+          await setCfg("ai_provider", provider);
+          out.ai_provider = provider;
+        }
         if (body.telegram_bot_token) {
           const token = String(body.telegram_bot_token).trim();
           const me = await tg("getMe", {}, token);

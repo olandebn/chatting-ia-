@@ -30,3 +30,29 @@ Le site sera en ligne à https://olandebn.github.io/chatting-ia-/
 - Quand le propriétaire répond lui-même : pause de la discussion, réponses programmées annulées, réponse ajoutée aux « Exemples à valider ».
 - `/stopai` envoyé par un contact : IA arrêtée dans la discussion et mémoire effacée.
 - Messages supprimés après 30 jours (tâche cron quotidienne).
+
+## Choisir OpenAI comme moteur IA
+
+Ce projet prend en charge Claude (Anthropic) et OpenAI. Par défaut, Claude reste actif afin d'éviter de casser le bot actuel.
+
+1. Sur [platform.openai.com/api-keys](https://platform.openai.com/api-keys), crée une clé API de projet avec facturation API séparée de ChatGPT Plus.
+2. Dans Supabase, projet Relais IA → **Edge Functions → Secrets**, crée **OPENAI_API_KEY** contenant cette clé. Ne mets jamais la clé dans `app.js`, dans GitHub ou dans le tableau de bord.
+3. Déploie les fonctions `worker` et `api` (et `telegram-webhook` si tu souhaites synchroniser la copie de `core.ts`).
+4. Dans Relais IA → Administration, choisis **OpenAI — GPT**, puis **GPT-5.4 mini** ; enregistre.
+5. Passe le bot en **Validation** et fais un test réel. Ensuite seulement, passe en Automatique.
+6. Configure des **alertes de budget et une limite de dépenses** sur ton projet OpenAI.
+
+**Déploiement en CLI (depuis la racine du projet) :**
+
+```bash
+supabase login
+supabase link --project-ref owbcnkcuxcgsawjqkssk
+supabase functions deploy worker
+supabase functions deploy api
+# facultatif pour harmoniser le core partagé :
+supabase functions deploy telegram-webhook
+```
+
+Pour publier l'interface : commite `app.js` dans le dépôt public `olandebn/chatting-ia-` (GitHub Pages).
+
+**Sécurité et confidentialité :** la clé OpenAI est utilisée uniquement côté Edge Function, jamais en navigateur. L'historique transmis à OpenAI inclut des messages privés Telegram ; informe les personnes concernées, vérifie leur consentement/tes obligations de protection des données, et garde les règles de conservation et de suppression des messages. `store: false` désactive la conservation de la réponse en tant qu'objet stocké, mais n'annule pas toutes les pratiques de journalisation du fournisseur.

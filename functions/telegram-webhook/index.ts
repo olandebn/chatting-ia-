@@ -184,6 +184,7 @@ async function handleBusinessMessage(m: any) {
 
   // Message du contact
   if ((m.text ?? "").trim().toLowerCase().startsWith("/stopai")) {
+    await db.from('contact_memory').delete().eq('user_id',uid).eq('chat_id',chat.id);
     await db.from("messages").delete().eq("chat_id", chat.id);
     await db.from("examples").delete().eq("chat_id", chat.id);
     await db.from("replies").update({ status: "cancelled", error: "/stopai" }).eq("chat_id", chat.id).in("status", ["scheduled", "draft"]);
@@ -207,6 +208,7 @@ async function handleBusinessMessage(m: any) {
 
   const mode = effectiveMode(chat, settings);
   if (mode !== "auto" && mode !== "validation") return;
+  if (settings?.ai_paused_reason) return;
 
   // Une seule réponse programmée par discussion : celle qui existe garde son échéance
   const { data: open } = await db.from("replies").select("id").eq("chat_id", chat.id).in("status", ["scheduled", "generating"]).maybeSingle();
@@ -243,6 +245,13 @@ Deno.serve(async (req) => {
   }
   const u = await req.json().catch(() => null);
   if (!u) return new Response("ok");
+  // RELAIS_V2_20261112 : déduplication d'update_id à durée de vie 48 h.
+  const updateId = u.update_id;
+  if (Number.isSafeInteger(updateId)) {
+    const {error} = await db.from('processed_updates').insert({update_id:updateId});
+    if (error?.code === '23505') return new Response('duplicate');
+    if (error) {console.error('idempotency insert',error.code);return new Response('retry',{status:500});}
+  }
   try {
     if (u.business_connection) await handleConnection(u.business_connection);
     else if (u.business_message) await handleBusinessMessage(u.business_message);
@@ -252,6 +261,8 @@ Deno.serve(async (req) => {
     else if (u.message && u.message.chat?.type === "private") await handlePrivate(u.message);
   } catch (e) {
     console.error("webhook error", e);
+    if (Number.isSafeInteger(updateId)) await db.from('processed_updates').delete().eq('update_id',updateId);
+    return new Response('retry',{status:500});
   }
-  return new Response("ok"); // toujours 200 pour éviter les renvois en boucle
+  return new Response("ok"); // acknowledgement only after successful processing
 });
