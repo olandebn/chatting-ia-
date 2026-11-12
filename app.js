@@ -1379,6 +1379,7 @@ async function viewPreviewSales(main){
   }catch(e){main.innerHTML=`${head('Aperçus & ventes','Configuration')}
     <section class="panel"><p>Impossible de charger le module. Vérifie le déploiement de la fonction Supabase <code>preview-sales</code>.</p></section>`;fail(e);return;}
   const settings=config.settings??{},links=config.links??[];
+  const ladder=config.ladder??{};
   const current=links.find(l=>String(l.id)===String(settings.active_link_id));
   main.innerHTML=`${head('Aperçus & ventes','Parcours photo et offres : contrôle manuel ou mode automatique au choix.')}
     <section class="panel">
@@ -1390,7 +1391,7 @@ async function viewPreviewSales(main){
             <input type="checkbox" id="pc-auto" ${settings.auto_enabled?'checked':''}>
             Activer le parcours automatique (photo puis lien)
           </label>
-          <p class="hint" style="margin:8px 0 0">En mode Automatique uniquement. Le contact demande une photo, confirme son envie de recevoir l'aperçu, puis peut demander le lien et déclarer sa majorité. Une photo et une offre au maximum par discussion. Aucune relance après refus.</p>
+          <p class="hint" style="margin:8px 0 0">En mode Automatique uniquement. Le contact demande une photo, confirme son envie de recevoir l'aperçu, puis pourra demander une offre si cela l’intéresse. Une photo par discussion, puis une offre au maximum à chaque palier après achat confirmé. Aucune relance après refus.</p>
           <p class="hint" style="margin:8px 0 0">L'IA continue de répondre avec NoTrack aux autres messages. Pour les offres adultes, Dropp.fans effectue séparément les contrôles d'accès et d'âge.</p>
         </div>
         <label for="pc-caption">Légende de la photo gratuite</label>
@@ -1403,6 +1404,18 @@ async function viewPreviewSales(main){
       </form>
     </section>
     <section class="panel" style="margin-top:16px">
+      <div class="panel-head"><div><h2>Progression PPV — 5 € / 10 € / 20 € / 50 €</h2><p>Offres successives après chaque paiement réellement confirmé.</p></div>
+        <span class="tag ${ladder.enabled?'ok':'warn'}">${ladder.enabled?'Configuré':'Inactif'}</span></div>
+      <p class="hint">Le lien à 5 € est celui sélectionné dans « Configuration ». Ajoute les trois autres liens dans « Liens de vente » avec les prix exacts, puis sélectionne-les ci-dessous. Les rôles CRM adaptent la formulation, sans sauter de paiement obligatoire.</p>
+      <form id="ppv-ladder-config" class="field">
+        ${[[10,'link_10_id'],[20,'link_20_id'],[50,'link_50_id']].map(([price,key])=>`<label for="ladder-${price}">Offre suivante à ${price} €</label>
+          <select id="ladder-${price}"><option value="">Non configurée</option>${links.map(l=>`<option value="${l.id}" ${String(l.id)===String(ladder[key])?'selected':''}>${esc(l.title)}${l.price_label?' — '+esc(l.price_label):''}</option>`).join('')}</select>`).join('')}
+        <label style="display:flex;align-items:center;gap:10px"><input type="checkbox" id="ladder-enabled" ${ladder.enabled?'checked':''}> Activer les offres progressives après achats confirmés</label>
+        <p class="hint">Important : aucun connecteur de confirmation automatique des paiements Dropp.fans n'est actuellement connecté. Sans un paiement fiable inscrit dans « payments » pour le bon contact et le bon lien, le bot n'enverra jamais le palier supérieur. Un clic ou un message du contact n'est pas une preuve d'achat.</p>
+        <button class="btn-primary" type="submit">Enregistrer les paliers</button>
+      </form>
+    </section>
+    <section class="panel" style="margin-top:16px">
       <div class="panel-head"><div><h2>Photo d'aperçu</h2><p>Image non explicite, dont tu possèdes les droits.</p></div><span class="tag ${settings.preview_image_path?'ok':'warn'}">${settings.preview_image_path?'Disponible':'À ajouter'}</span></div>
       <form id="pc-upload" class="row" style="gap:12px;align-items:end">
         <div class="grow"><label for="pc-file">Choisir une photo (JPG, PNG ou WebP, 5 Mo max)</label><input type="file" id="pc-file" accept="image/jpeg,image/png,image/webp" required></div>
@@ -1412,7 +1425,7 @@ async function viewPreviewSales(main){
       <div id="pc-photo"></div>
     </section>
     <section class="panel" style="margin-top:16px">
-      <div class="panel-head"><div><h2>Envoyer à un contact</h2><p>Aucun envoi automatique dans cette version : validation obligatoire.</p></div></div>
+      <div class="panel-head"><div><h2>Envoyer à un contact</h2><p>Les boutons ci-dessous restent manuels. Le parcours automatique utilise les réglages au-dessus.</p></div></div>
       <div class="field">
         <label for="pc-chat">Conversation Telegram</label>
         <select id="pc-chat"><option value="">Choisir un contact</option>${chats.filter(c=>!c.ai_stopped).map(c=>`<option value="${c.id}">${esc(c.title||c.username||String(c.id))}</option>`).join('')}</select>
@@ -1437,6 +1450,17 @@ async function viewPreviewSales(main){
       preview_caption:$('#pc-caption').value.trim(),offer_intro:$('#pc-intro').value.trim(),
       active_link_id:$('#pc-link').value?Number($('#pc-link').value):null
     });toast('Réglages enregistrés');await viewPreviewSales(main);}catch(err){fail(err);btn.disabled=false;}
+  });
+  $('#ppv-ladder-config').addEventListener('submit',async e=>{
+    e.preventDefault();const btn=$('#ppv-ladder-config button');btn.disabled=true;
+    const selected=p=>$('#ladder-'+p).value?Number($('#ladder-'+p).value):null;
+    try{
+      await previewSalesCall('configure_ladder',{
+        enabled:$('#ladder-enabled').checked,
+        link_10_id:selected(10),link_20_id:selected(20),link_50_id:selected(50)
+      });
+      toast('Paliers enregistrés');await viewPreviewSales(main);
+    }catch(err){fail(err);btn.disabled=false;}
   });
   $('#pc-upload').addEventListener('submit',async e=>{
     e.preventDefault();const file=$('#pc-file').files?.[0];if(!file)return;
