@@ -1380,11 +1380,19 @@ async function viewPreviewSales(main){
     <section class="panel"><p>Impossible de charger le module. Vérifie le déploiement de la fonction Supabase <code>preview-sales</code>.</p></section>`;fail(e);return;}
   const settings=config.settings??{},links=config.links??[];
   const current=links.find(l=>String(l.id)===String(settings.active_link_id));
-  main.innerHTML=`${head('Aperçus & ventes','Garde le contrôle des aperçus et des liens proposés.')}
+  main.innerHTML=`${head('Aperçus & ventes','Parcours photo et offres : contrôle manuel ou mode automatique au choix.')}
     <section class="panel">
       <div class="panel-head"><div><h2>Configuration</h2><p>Activation générale et messages personnalisables.</p></div><span class="tag ${settings.enabled?'ok':'warn'}">${settings.enabled?'Activé':'Désactivé'}</span></div>
       <form id="preview-config" class="field">
         <label style="display:flex;align-items:center;gap:10px"><input type="checkbox" id="pc-enabled" ${settings.enabled?'checked':''}> Autoriser les envois depuis cette page</label>
+        <div style="border:1px solid #d7dfeb;padding:14px;border-radius:12px;margin:12px 0;background:#f5f8fd">
+          <label style="display:flex;align-items:center;gap:10px;font-weight:700">
+            <input type="checkbox" id="pc-auto" ${settings.auto_enabled?'checked':''}>
+            Activer le parcours automatique (photo puis lien)
+          </label>
+          <p class="hint" style="margin:8px 0 0">En mode Automatique uniquement. Le contact demande une photo, confirme son envie de recevoir l'aperçu, puis peut demander le lien et déclarer sa majorité. Une photo et une offre au maximum par discussion. Aucune relance après refus.</p>
+          <p class="hint" style="margin:8px 0 0">L'IA continue de répondre avec NoTrack aux autres messages. Pour les offres adultes, Dropp.fans effectue séparément les contrôles d'accès et d'âge.</p>
+        </div>
         <label for="pc-caption">Légende de la photo gratuite</label>
         <textarea id="pc-caption" maxlength="300" rows="2" required>${esc(settings.preview_caption||'Voici un aperçu gratuit, comme demandé.')}</textarea>
         <label for="pc-intro">Message précédant le lien</label>
@@ -1425,7 +1433,7 @@ async function viewPreviewSales(main){
   $('#preview-config').addEventListener('submit',async e=>{
     e.preventDefault();const btn=$('#preview-config button');btn.disabled=true;
     try{await previewSalesCall('configure',{
-      enabled:$('#pc-enabled').checked,
+      enabled:$('#pc-enabled').checked,auto_enabled:$('#pc-auto').checked,
       preview_caption:$('#pc-caption').value.trim(),offer_intro:$('#pc-intro').value.trim(),
       active_link_id:$('#pc-link').value?Number($('#pc-link').value):null
     });toast('Réglages enregistrés');await viewPreviewSales(main);}catch(err){fail(err);btn.disabled=false;}
