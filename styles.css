@@ -277,3 +277,21 @@ th { font-weight: 600; color: var(--ink-2); font-size: 13px; border-top: 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Relais IA — photos privées */
+.vault-form{display:flex;flex-wrap:wrap;align-items:end;gap:14px;margin:18px 0 4px}
+.vault-form label,.vault-upload label{display:flex;flex-direction:column;gap:7px;font-weight:600;font-size:.9rem}
+.vault-form input{padding:11px 13px;border:1px solid #d4dbee;border-radius:10px;width:160px;font:inherit}
+.vault-upload{display:flex;flex-wrap:wrap;align-items:end;gap:16px;padding:18px;margin:16px 0 22px;border:1px dashed #cbd5e1;border-radius:14px;background:#f8faff}
+.vault-upload input{display:block;max-width:100%;font:inherit;margin-top:6px}
+.vault-toolbar{display:flex;align-items:start;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.vault-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:14px;margin-top:18px}
+.vault-item{border:1px solid #dbe2f1;border-radius:14px;overflow:hidden;background:white}
+.vault-item>a{display:block;aspect-ratio:1/1;background:#eef2f8}
+.vault-item img{display:block;width:100%;height:100%;object-fit:cover}
+.vault-item-info{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:10px}
+.vault-item-info span{font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vault-item-info button{flex-shrink:0}
+.vault-missing{display:grid;place-items:center;aspect-ratio:1/1;padding:12px;color:#64748b;text-align:center}
+@media(max-width:600px){.vault-form,.vault-upload{display:flex;flex-direction:column;align-items:stretch}.vault-form input{width:100%}}
+

@@ -288,7 +288,7 @@ function renderNewPassword() {
 // ---------- Tableau de bord : coquille ----------
 const SECTIONS = [
   ["accueil", "Accueil"], ["controle", "Contrôle IA"], ["conversations", "Conversations"], ["stats", "Statistiques"],
-  ["apprentissage", "Apprentissage"], ["liens", "Liens de vente"], ["compte", "Mon compte"],
+  ["apprentissage", "Apprentissage"], ["liens", "Liens de vente"], ["photos", "Photos privées"], ["compte", "Mon compte"],
 ];
 
 async function renderApp(section) {
@@ -316,7 +316,7 @@ async function renderApp(section) {
   });
   const main = $("#main");
   const views = { accueil: viewHome, controle: viewControl, conversations: viewConvos, stats: viewStats,
-    apprentissage: viewLearn, liens: viewLinks, compte: viewAccount, admin: viewAdmin };
+    apprentissage: viewLearn, liens: viewLinks, photos: viewPhotos, compte: viewAccount, admin: viewAdmin };
   await views[section](main);
 }
 
@@ -1013,11 +1013,113 @@ function renderGuide() {
   </article>${siteFoot()}`;
 }
 
+// ---------- Galerie privée : authentification + PIN côté serveur ----------
+// Aucun PIN et aucune photo ne sont stockés dans localStorage ou sur GitHub Pages.
+let photoVaultPin = null;
+let photoVaultOwner = null;
+async function photoVaultRequest(action, pin = null, file = null, id = null) {
+  let body;
+  if (file) {
+    body = new FormData();
+    body.append('action', action);
+    body.append('pin', pin);
+    body.append('file', file, file.name);
+  } else body = { action, ...(pin !== null ? {pin} : {}), ...(id ? {id} : {}) };
+  const {data,error} = await sb.functions.invoke('photo-vault', {body});
+  if (error) {
+    let message = error.message;
+    try {
+      const detail = await error.context?.json();
+      if (detail?.error) message = detail.error;
+    } catch (_) { /* aucun détail supplémentaire */ }
+    throw new Error(message || 'Galerie indisponible');
+  }
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+async function viewPhotos(main) {
+  const uid = state.session?.user?.id;
+  if (photoVaultOwner !== uid) { photoVaultOwner = uid; photoVaultPin = null; }
+  main.innerHTML = `${head('Photos privées', 'Tes photos générées, protégées par un code à 4 chiffres.')}
+    <section class="panel"><div id="vault-content"><p class="muted">Chargement de la galerie…</p></div></section>`;
+  const area = $('#vault-content');
+  let configured;
+  try { configured = (await photoVaultRequest('status')).configured; }
+  catch(e) {
+    area.innerHTML = `<p class="muted">La galerie n'est pas encore activée sur Supabase.</p>`;
+    fail(e); return;
+  }
+  const showGate = () => {
+    if (!configured) {
+      area.innerHTML = `<h2>Créer ton code</h2><p class="muted">Choisis 4 chiffres difficiles à deviner. N'utilise pas 1234.</p>
+        <form id="vault-setup" class="vault-form">
+          <label>Code à 4 chiffres<input id="vault-pin-new" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></label>
+          <label>Confirmer<input id="vault-pin-confirm" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></label>
+          <button class="btn-primary" type="submit">Protéger ma galerie</button></form>`;
+      $('#vault-setup').addEventListener('submit', async(e)=>{
+        e.preventDefault();
+        const pin=$('#vault-pin-new').value;
+        if (pin !== $('#vault-pin-confirm').value) return toast('Les codes ne correspondent pas',true);
+        const btn=$('#vault-setup button'); btn.disabled=true;
+        try {await photoVaultRequest('setup',pin);photoVaultPin=pin;configured=true;await showGallery();}
+        catch(err){fail(err);btn.disabled=false;}
+      });
+    } else {
+      area.innerHTML = `<h2>Déverrouiller la galerie</h2>
+        <p class="muted">Entre ton code personnel. Après 5 erreurs, l'accès est bloqué 15 minutes.</p>
+        <form id="vault-unlock" class="vault-form"><label>Code à 4 chiffres
+          <input id="vault-pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required>
+          </label><button class="btn-primary" type="submit">Déverrouiller</button></form>`;
+      $('#vault-unlock').addEventListener('submit',async(e)=>{
+        e.preventDefault(); const btn=$('#vault-unlock button');btn.disabled=true;
+        const pin=$('#vault-pin').value;
+        try{await photoVaultRequest('unlock',pin);photoVaultPin=pin;await showGallery();}
+        catch(err){photoVaultPin=null;fail(err);btn.disabled=false;}
+      });
+    }
+  };
+  const showGallery = async () => {
+    let items;
+    try {items=(await photoVaultRequest('list',photoVaultPin)).items??[];}
+    catch(err){photoVaultPin=null;showGate();fail(err);return;}
+    area.innerHTML = `<div class="vault-toolbar">
+       <div><h2>Ma galerie</h2><p class="muted">${items.length} photo(s) · JPG, PNG, WebP · 5 Mo maximum par photo</p></div>
+       <button class="btn-sm" id="vault-lock">Verrouiller</button>
+      </div>
+      <form class="vault-upload" id="vault-upload"><label>Ajouter une photo générée
+        <input id="vault-file" type="file" accept="image/jpeg,image/png,image/webp" required>
+       </label><button class="btn-primary" type="submit">Ajouter à ma galerie</button></form>
+      <div class="vault-gallery">${items.length ? items.map(item=>`
+       <article class="vault-item">
+         ${item.signed_url ? `<a href="${esc(item.signed_url)}" target="_blank" rel="noopener noreferrer" title="Afficher l'image">
+           <img src="${esc(item.signed_url)}" loading="lazy" alt="${esc(item.name)}"></a>` : '<div class="vault-missing">Image temporairement indisponible</div>'}
+         <div class="vault-item-info"><span title="${esc(item.name)}">${esc(item.name)}</span>
+           <button class="btn-sm vault-delete" data-id="${esc(item.id)}" type="button">Supprimer</button></div>
+       </article>`).join('') : `<div class="empty">Aucune photo. Ajoute ta première image avec le bouton ci-dessus.</div>`}</div>
+      <p class="small muted">Les aperçus utilisent des liens temporaires. Actualise la galerie si un aperçu expire.</p>`;
+    $('#vault-lock').addEventListener('click',()=>{photoVaultPin=null;showGate();});
+    $('#vault-upload').addEventListener('submit',async(e)=>{
+      e.preventDefault(); const file=$('#vault-file').files?.[0]; if(!file)return;
+      if(file.size>5*1024*1024)return toast('La photo dépasse 5 Mo',true);
+      const btn=$('#vault-upload button');btn.disabled=true;
+      try{await photoVaultRequest('upload',photoVaultPin,file);toast('Photo enregistrée');await showGallery();}
+      catch(err){fail(err);btn.disabled=false;}
+    });
+    $$('.vault-delete',area).forEach(btn=>btn.addEventListener('click',async()=>{
+      if(!confirm('Supprimer définitivement cette photo ?'))return;
+      btn.disabled=true;
+      try{await photoVaultRequest('delete',photoVaultPin,null,btn.dataset.id);toast('Photo supprimée');await showGallery();}
+      catch(err){fail(err);btn.disabled=false;}
+    }));
+  };
+  if(photoVaultPin)await showGallery();else showGate();
+}
+
 // ---------- Démarrage ----------
 sb.auth.onAuthStateChange((event, session) => {
   const had = !!state.session;
   state.session = session;
-  if (!session) { state.overview = null; state.settings = null; }
+  if (!session) { state.overview = null; state.settings = null; photoVaultPin = null; photoVaultOwner = null; }
   if (event === "PASSWORD_RECOVERY") { location.hash = "#/nouveau-mot-de-passe"; return; }
   if (event === "SIGNED_IN" && !had && (!location.hash || location.hash === "#/" || location.hash.startsWith("#/connexion") || location.hash.startsWith("#/inscription"))) {
     location.hash = "#/app/accueil";
