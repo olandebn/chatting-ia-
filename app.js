@@ -450,6 +450,35 @@ async function viewControl(main) {
     <p class="hint">Les réponses déjà programmées gardent leur échéance. Les pauses et les droits Telegram restent prioritaires.</p>
   </section>
 
+  <!-- RELAIS_V2_20261112 -->
+  <section class="panel"><div class="panel-head"><div><h2>Style des réponses</h2><p>NoTrack reste le moteur actif ; personnalise son style par compte.</p></div></div>
+    <form id="style-v2-form">
+      <div class="grid-2">
+        <div class="field"><label for="v2-length">Longueur</label><select id="v2-length">
+          <option value="short" ${s.reply_length === "short" ? "selected" : ""}>Courte (10–20 mots)</option>
+          <option value="medium" ${!s.reply_length || s.reply_length === "medium" ? "selected" : ""}>Moyenne (20–35 mots)</option>
+          <option value="long" ${s.reply_length === "long" ? "selected" : ""}>Longue (35–60 mots)</option>
+        </select></div>
+        <div class="field"><label for="v2-emoji">Emojis</label><select id="v2-emoji">
+          <option value="none" ${s.emoji_level === "none" ? "selected" : ""}>Aucun</option>
+          <option value="rare" ${!s.emoji_level || s.emoji_level === "rare" ? "selected" : ""}>Rares (0–1)</option>
+          <option value="frequent" ${s.emoji_level === "frequent" ? "selected" : ""}>Fréquents (0–2)</option>
+        </select></div>
+        <div class="field"><label for="v2-tone">Ton</label><select id="v2-tone">
+          <option value="warm" ${!s.reply_tone || s.reply_tone === "warm" ? "selected" : ""}>Chaleureux</option>
+          <option value="neutral" ${s.reply_tone === "neutral" ? "selected" : ""}>Neutre</option>
+          <option value="professional" ${s.reply_tone === "professional" ? "selected" : ""}>Professionnel</option>
+        </select></div>
+        <div class="field"><label for="v2-pronouns">Registre</label><select id="v2-pronouns">
+          <option value="tu" ${!s.pronouns || s.pronouns === "tu" ? "selected" : ""}>Tutoiement</option>
+          <option value="vous" ${s.pronouns === "vous" ? "selected" : ""}>Vouvoiement</option>
+        </select></div>
+      </div>
+      <button type="submit" class="btn-primary">Enregistrer le style</button>
+    </form>
+  </section>
+  ${s.ai_paused_reason ? `<section class="panel"><div class="mode-banner" style="background:#f8e1e1">NoTrack / API suspendue : ${esc(s.ai_paused_reason)}.
+  <button class="btn-sm" id="v2-resume-ai">Reprendre après correction</button></div></section>` : ""}
   <div class="grid-2">
     <section class="panel">
       <div class="panel-head"><div><h2>Reprise après tes réponses</h2><p>Quand tu réponds toi-même, l'assistant attend avant de reprendre cette discussion.</p></div></div>
@@ -484,6 +513,15 @@ async function viewControl(main) {
       catch (err) { fail(err); button.disabled = false; }
     });
   }
+  // RELAIS_V2_20261112
+  $("#style-v2-form").addEventListener("submit", async (e)=>{
+    e.preventDefault();
+    await saveSettings({reply_length:$("#v2-length").value,emoji_level:$("#v2-emoji").value,
+      reply_tone:$("#v2-tone").value,pronouns:$("#v2-pronouns").value},"Style des réponses enregistré").catch(fail);
+  });
+  $("#v2-resume-ai")?.addEventListener("click",async()=>{
+    try {await api("resume_ai",{});toast("IA réactivée");await render();}catch(e){fail(e);}
+  });
   bindLever($("#lever"), async (m) => {
     setMode(m);
     $("#mode-banner").textContent = MODES[m].banner;
@@ -546,9 +584,10 @@ async function viewConvos(main) {
 async function showChat(c) {
   const d = $("#detail"), s = state.settings;
   d.innerHTML = `<div class="empty">Chargement…</div>`;
-  const [msgs, open] = await Promise.all([
+  const [msgs, open, memory] = await Promise.all([
     q(sb.from("messages").select("role, text, created_at").eq("chat_id", c.id).order("created_at", { ascending: false }).limit(80)),
     q(sb.from("replies").select("id, status, due_at, error").eq("chat_id", c.id).order("created_at", { ascending: false }).limit(1)),
+    q(sb.from("contact_memory").select("summary").eq("chat_id",c.id).limit(1)),
   ]);
   const last = open[0];
   const paused = c.paused_until && new Date(c.paused_until) > new Date();
@@ -566,7 +605,10 @@ async function showChat(c) {
     ${c.ai_stopped ? `<div class="mode-banner" style="background:#f8e1e1">Ce contact a écrit /stopai : l'IA est arrêtée et sa mémoire a été effacée.
       <button class="btn-sm" id="restart" style="margin-left:8px">Réactiver (s'il te l'a demandé)</button></div>` : ""}
     ${last?.status === "scheduled" ? `<div class="mode-banner">Réponse prévue vers ${fmtDate(last.due_at)}. <button class="btn-sm" id="cancel" style="margin-left:8px">Annuler cette réponse</button></div>` : ""}
-    ${last?.status === "failed" ? `<div class="mode-banner" style="background:#f8e1e1">Dernière réponse non envoyée : ${esc(last.error)}</div>` : ""}
+    ${last?.status === "failed" ? `<div class="mode-banner" style="background:#f8e1e1">Dernière réponse non envoyée : ${esc(last.error)} <button class="btn-sm" id="v2-retry">Réessayer</button></div>` : ""}
+    <section class="panel" style="padding:12px"><div class="row" style="justify-content:space-between;align-items:center">
+      <strong>Mémoire du contact</strong><button class="btn-sm" id="v2-clear-memory">Effacer le résumé</button></div>
+      <p class="small muted">${esc(memory?.[0]?.summary || "Aucune information mémorisée")}</p></section>
     <div class="thread" id="thread">${msgs.length ? msgs.reverse().map((m) => `<div class="bubble ${m.role === "contact" ? "in" : m.role}">${esc(m.text)}
         <div class="meta">${m.role === "ai" ? "Assistant" : m.role === "owner" ? "Toi" : esc(c.title)} · ${fmtDate(m.created_at)}</div></div>`).join("")
       : `<p class="muted small" style="margin:auto">Mémoire vide pour cette discussion.</p>`}</div>
@@ -577,11 +619,18 @@ async function showChat(c) {
   const upd = async (patch, msg) => {
     try { await q(sb.from("chats").update(patch).eq("id", c.id)); toast(msg); Object.assign(c, patch); render(); } catch (e) { fail(e); }
   };
+  $("#v2-clear-memory")?.addEventListener("click",async()=>{
+    if(!confirm("Effacer le résumé de ce contact ?"))return;
+    try{await q(sb.from("contact_memory").delete().eq("chat_id",c.id));toast("Résumé effacé");showChat(c);}catch(e){fail(e);}
+  });
   $("#pin").addEventListener("click", () => upd({ pinned: !c.pinned }, c.pinned ? "Discussion désépinglée" : "Discussion épinglée"));
   $("#mode-o").addEventListener("change", (e) => upd({ mode_override: e.target.value || null }, "Mode de la discussion enregistré"));
   $("#pause")?.addEventListener("click", () => upd({ paused_until: new Date(Date.now() + 3600e3).toISOString() }, "Discussion en pause pendant 1 h"));
   $("#resume")?.addEventListener("click", () => upd({ paused_until: null }, "L'assistant reprend cette discussion"));
   $("#restart")?.addEventListener("click", () => { if (confirm("Réactiver l'IA pour ce contact ? Fais-le uniquement s'il te l'a demandé.")) upd({ ai_stopped: false }, "IA réactivée pour ce contact"); });
+  $("#v2-retry")?.addEventListener("click",async()=>{
+    try{await api("retry_failed",{reply_id:last.id});toast("Réponse reprogrammée");showChat(c);}catch(e){fail(e);}
+  });
   $("#cancel")?.addEventListener("click", async () => { try { await api("cancel_scheduled", { chat_id: c.id }); toast("Réponse annulée"); showChat(c); } catch (e) { fail(e); } });
   $("#clear").addEventListener("click", async () => {
     if (!confirm(`Effacer la mémoire de la discussion avec ${c.title} ?`)) return;
@@ -629,12 +678,14 @@ async function loadStats() {
   body.innerHTML = `<div class="empty">Calcul en cours…</div>`;
   try {
     const st = await q(sb.rpc("get_stats", { p_from: from.toISOString(), p_to: to.toISOString() }));
+    const v2 = await q(sb.rpc("get_relais_v2_stats", {p_from:from.toISOString(),p_to:to.toISOString()}));
     const kpi = (n, l) => `<div class="kpi"><div class="big-num">${nf.format(n)}</div><div class="label">${l}</div></div>`;
     const series = st.series ?? [];
     const max = Math.max(1, ...series.map((d) => Math.max(d.received, d.ai_sent + d.owner)));
     body.innerHTML = `<div class="kpis">
       ${kpi(st.received, "Messages reçus")}${kpi(st.ai_sent, "Réponses de l'assistant")}${kpi(st.owner, "Tes propres réponses")}
-      ${kpi(st.drafts, "Brouillons préparés")}${kpi(st.link_sent, "Réponses avec un lien")}${kpi(st.active_chats, "Discussions actives")}</div>
+      ${kpi(v2.failed_replies||0, "Réponses en échec")}${kpi(v2.confirmed_payments||0, "Paiements confirmés")}${kpi(st.drafts, "Brouillons préparés")}${kpi(st.link_sent, "Réponses avec un lien")}${kpi(st.active_chats, "Discussions actives")}</div>
+      <section class="panel"><p class="hint">Coût NoTrack estimé : $${Number(v2.estimated_ai_cost_usd||0).toFixed(4)} · Entrée : ${nf.format(Number(v2.tokens_in||0))} tokens · Sortie : ${nf.format(Number(v2.tokens_out||0))} tokens · CA confirmé : ${Number(v2.confirmed_revenue_eur||0).toFixed(2)} €.</p></section>
       <section class="panel"><div class="panel-head"><div><h2>Activité par jour</h2></div>
         <div class="legend"><span style="--c:#c7cfe6">Reçus</span><span style="--c:var(--auto)">Assistant</span><span style="--c:var(--signal)">Toi</span></div></div>
         ${series.length > 0 ? `<div class="chart" role="img" aria-label="Activité par jour">${series.map((d) => `
@@ -742,6 +793,8 @@ async function viewLinks(main) {
         <div class="field"><label for="l-url">Lien</label><input id="l-url" type="url" required placeholder="https://…" ${ok ? "" : "disabled"}></div>
         <div class="field"><label for="l-price">Prix affiché (facultatif)</label><input id="l-price" type="text" maxlength="40" placeholder="Ex. : 29 €" ${ok ? "" : "disabled"}></div>
         <div class="field"><label for="l-desc">Quand le proposer</label><textarea id="l-desc" maxlength="500" rows="3" placeholder="Ex. : Quand quelqu'un demande comment travailler avec moi ou parle de reprendre le sport." ${ok ? "" : "disabled"}></textarea></div>
+        <label class="switch"><input type="checkbox" id="l-adult" ${ok ? "" : "disabled"}><span class="track"></span>Offre réservée aux adultes (18+)</label>
+        <p class="hint">Les offres 18+ restent désactivées dans les réponses IA tant que la vérification d'âge n'est pas intégrée.</p>
         <button class="btn-primary" type="submit" ${ok ? "" : "disabled"}>Ajouter le lien</button>
       </form>
     </section>
@@ -760,7 +813,7 @@ async function viewLinks(main) {
   $("#link-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
-      await q(sb.from("links").insert({ title: $("#l-title").value.trim(), url: $("#l-url").value.trim(), price_label: $("#l-price").value.trim() || null, description: $("#l-desc").value.trim() || null }));
+      await q(sb.from("links").insert({ title: $("#l-title").value.trim(), url: $("#l-url").value.trim(), price_label: $("#l-price").value.trim() || null, description: $("#l-desc").value.trim() || null, adult_only: $("#l-adult").checked }));
       toast("Lien ajouté"); render();
     } catch (err) { fail(err); }
   });
