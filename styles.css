@@ -312,3 +312,35 @@ th { font-weight: 600; color: var(--ink-2); font-size: 13px; border-top: 0; }
 .vault-footnote{margin-top:20px}.vault-no-items{grid-column:1/-1}.vault-folder[hidden],.vault-photo[hidden],.vault-zoom[hidden]{display:none!important}
 @media(max-width:850px){.vault-upload{grid-template-columns:1fr 1fr}.vault-upload-title{grid-column:1/-1}}
 @media(max-width:600px){.vault-form,.vault-upload{display:flex;flex-direction:column;align-items:stretch}.vault-form input{width:100%}.vault-gallery{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}.vault-folder-actions{padding-left:0}}
+
+/* ---------- CRM Relais IA V1 ---------- */
+.crm-card-meta { display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:5px }
+.crm-role {display:inline-block;border-radius:999px;font-size:11px;font-weight:700;padding:3px 8px;white-space:nowrap;background:#ecf0f7;color:#283657}
+.crm-role-none {background:#eef1f7;color:#67738d}
+.crm-role-bronze {background:#f9e5d3;color:#8b4e21}
+.crm-role-silver {background:#e6ecf5;color:#3f526d}
+.crm-role-gold {background:#fff0c4;color:#8d6115}
+.crm-role-vip {background:#efe3fc;color:#6d38a0}
+.crm-card-spend {color:#65718b;font-size:11px;white-space:nowrap}
+.crm-wrap {border:1px solid #dce3f1;border-radius:14px;padding:15px;margin:14px 0;background:#fbfcff}
+.crm-heading {display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:13px;flex-wrap:wrap}
+.crm-heading h3 {margin:0;font-size:17px}
+.crm-kpis {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.crm-kpis>div {background:white;border:1px solid #e1e7f2;border-radius:10px;padding:10px;min-width:0}
+.crm-kpis small {display:block;color:#6e788e;font-size:11px}
+.crm-kpis strong {display:block;color:#192448;font-size:17px;margin-top:4px;overflow-wrap:anywhere}
+.crm-disclaimer {font-size:12px;color:#697589;line-height:1.5;margin:10px 0 0}
+.crm-fold {background:white;border:1px solid #e1e7f2;border-radius:10px;margin-top:10px;padding:10px 12px}
+.crm-fold>summary {font-weight:700;font-size:13px;cursor:pointer;padding:4px}
+.crm-form {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}
+.crm-form>label {font-size:12px;font-weight:600;color:#283657;display:grid;gap:5px;min-width:0}
+.crm-form input,.crm-form select,.crm-form textarea {width:100%;min-width:0;border:1px solid #d9e1ed;border-radius:8px;padding:9px 10px;background:#fff;color:#172443;font-size:13px;font-family:inherit}
+.crm-form textarea {resize:vertical}
+.crm-wide {grid-column:1/-1}
+.crm-history {list-style:none;margin:6px 0 16px;padding:0}
+.crm-history li {display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #eef1f6;font-size:12px;flex-wrap:wrap}
+.crm-history li span {flex:1;min-width:90px}
+.crm-fold h4 {font-size:13px;margin:16px 0 5px}
+#crm-role-filter,#crm-sort {max-width:175px;font-size:12px}
+@media (max-width:720px){.crm-form{grid-template-columns:1fr}.crm-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.crm-wide{grid-column:1}.crm-wrap{padding:10px}}
+

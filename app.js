@@ -553,13 +553,14 @@ function chatStatus(c, s) {
 async function viewConvos(main) {
   const s = state.settings;
   const chats = await q(sb.from("chats").select("*").order("pinned", { ascending: false }).order("last_message_at", { ascending: false, nullsFirst: false }).limit(200));
+  await crmLoad(chats);
   main.innerHTML = `${head("Conversations", `${chats.length} discussion${chats.length > 1 ? "s" : ""}. Les épinglées s'affichent en premier.`,
-    `<input type="text" id="search" placeholder="Rechercher un contact" style="width:220px"><button class="btn-sm" id="refresh">Actualiser</button>`)}
+    `<input type="text" id="search" placeholder="Nom, pseudo, etiquette" style="width:205px"><select id="crm-role-filter" aria-label="Filtrer par role"><option value="all">Tous les roles</option><option value="buyers">Acheteurs suivis</option><option value="none">Sans achat suivi</option><option value="bronze">Bronze</option><option value="silver">Argent</option><option value="gold">Or</option><option value="vip">VIP</option></select><select id="crm-sort" aria-label="Trier les discussions"><option value="recent">Plus recents</option><option value="spend">Plus gros acheteurs</option><option value="name">Par nom</option></select><button class="btn-sm" id="refresh">Actualiser</button>`)}
   <div class="convo-layout">
     <section class="panel" style="padding:10px">${chats.length ? `<ul class="convo-list" id="list" role="listbox" aria-label="Discussions">${chats.map((c) => `
-      <li class="convo" role="option" tabindex="0" data-id="${c.id}" data-q="${esc((c.title + " " + (c.username ?? "")).toLowerCase())}" aria-selected="${c.id === state.selectedChat}">
+      <li class="convo" role="option" tabindex="0" data-id="${c.id}" data-q="${esc((c.title + " " + (c.username ?? "") + " " + (crmAccountFor(c.id).profile.nickname ?? "") + " " + (crmAccountFor(c.id).profile.tags ?? []).join(" ")).toLowerCase())}" aria-selected="${c.id === state.selectedChat}">
         <span class="avatar" style="background:${avColor(c.title)}">${esc(initials(c.title))}</span>
-        <div style="min-width:0"><div class="name">${c.pinned ? "📌 " : ""}${esc(c.title)}</div>
+        <div style="min-width:0"><div class="name">${c.pinned ? "📌 " : ""}${esc(c.title)}</div>${crmCardBadge(c)}
           <div class="sub">${esc(chatStatus(c, s))}${c.last_message_preview ? " · " + esc(c.last_message_preview) : ""}</div></div>
         <div class="side"><span class="small muted">${fmtDate(c.last_message_at)}</span>${c.unread ? `<span class="unread">${c.unread}</span>` : ""}</div>
       </li>`).join("")}</ul>`
@@ -568,10 +569,7 @@ async function viewConvos(main) {
   </div>`;
 
   $("#refresh").addEventListener("click", () => render());
-  $("#search").addEventListener("input", (e) => {
-    const v = e.target.value.toLowerCase().trim();
-    $$(".convo").forEach((li) => li.classList.toggle("hidden", !!v && !li.dataset.q.includes(v)));
-  });
+  crmListFilters(chats);
   $$(".convo").forEach((li) => {
     const open = () => { state.selectedChat = Number(li.dataset.id); $$(".convo").forEach((x) => x.setAttribute("aria-selected", String(x === li))); showChat(chats.find((c) => c.id === state.selectedChat)); };
     li.addEventListener("click", open);
@@ -593,6 +591,7 @@ async function showChat(c) {
   const paused = c.paused_until && new Date(c.paused_until) > new Date();
   d.innerHTML = `<div class="panel-head"><div><h2>${esc(c.title)}</h2><p>${c.username ? "@" + esc(c.username) + " · " : ""}${esc(chatStatus(c, s))}</p></div>
       <button class="btn-sm" id="pin">${c.pinned ? "Désépingler" : "Épingler"}</button></div>
+    ${crmContactHtml(c)}
     <div class="row">
       <div class="grow" style="min-width:200px"><label for="mode-o">Mode pour cette discussion</label>
         <select id="mode-o">
@@ -614,6 +613,7 @@ async function showChat(c) {
       : `<p class="muted small" style="margin:auto">Mémoire vide pour cette discussion.</p>`}</div>
     <div class="row" style="justify-content:space-between"><p class="small muted" style="margin:0">Messages conservés 30 jours, propres à cette discussion.</p>
       <button class="btn-sm btn-danger" id="clear">Effacer la mémoire</button></div>`;
+  crmBindDetail(c);
   const th = $("#thread"); th.scrollTop = th.scrollHeight;
 
   const upd = async (patch, msg) => {
@@ -637,6 +637,160 @@ async function showChat(c) {
     try { await api("clear_chat_memory", { chat_id: c.id }); toast("Mémoire effacée"); showChat(c); } catch (e) { fail(e); }
   });
 }
+
+// ---------- CRM Relais IA V1 : fiches contacts, achats suivis, roles ----------
+// Les montants saisis a la main ne sont JAMAIS presentes comme des paiements verifies.
+let crmState = null;
+const CRM_LABELS = {none:'Nouveau',bronze:'Bronze',silver:'Argent',gold:'Or',vip:'VIP'};
+const crmMoney = cents => new Intl.NumberFormat('fr-FR',{style:'currency',currency:'EUR'}).format((Number(cents)||0)/100);
+const crmSafeCents = value => {
+  const n=Number(String(value??'').trim().replace(',','.'));
+  if(!Number.isFinite(n)||n<=0||n>100000) throw new Error('Montant invalide');
+  return Math.round(n*100);
+};
+function crmAccountFor(chatId) {
+  const c=crmState?.byChat?.get(String(chatId));
+  return c??{verified:0,manual:0,verifiedCount:0,manualCount:0,profile:{},sales:[],realPayments:[]};
+}
+function crmThresholds() {
+  return crmState?.thresholds??{silver_cents:5000,gold_cents:15000,vip_cents:30000};
+}
+function crmRole(c) {
+  const v=crmAccountFor(c.id),total=v.verified+v.manual,t=crmThresholds();
+  const automatic = total>=t.vip_cents?'vip':total>=t.gold_cents?'gold':total>=t.silver_cents?'silver':total>=100?'bronze':'none';
+  const role = CRM_LABELS[v.profile.role_override] ? v.profile.role_override : automatic;
+  return {role,automatic,overridden:role!==automatic};
+}
+async function crmLoad(chats) {
+  const uid=state.session?.user?.id;
+  if(!uid) throw new Error('Session requise pour les fiches contacts');
+  const [manual,profiles,thresholds,payments]=await Promise.all([
+    q(sb.from('crm_manual_sales').select('id,chat_id,amount_cents,note,created_at').order('created_at',{ascending:false}).limit(2000)),
+    q(sb.from('crm_contact_profiles').select('chat_id,nickname,notes,tags,role_override').limit(2000)),
+    q(sb.from('crm_tier_settings').select('silver_cents,gold_cents,vip_cents').maybeSingle()),
+    q(sb.from('payments').select('id,chat_id,amount,currency,provider,confirmed_at').eq('status','confirmed').eq('currency','EUR').in('provider',['dropp','dropp.fans']).limit(2000)),
+  ]);
+  const byChat=new Map();
+  for(const c of chats) byChat.set(String(c.id),{verified:0,manual:0,verifiedCount:0,manualCount:0,profile:{},sales:[],realPayments:[]});
+  for(const p of profiles??[]) {const v=byChat.get(String(p.chat_id));if(v)v.profile=p;}
+  for(const x of manual??[]) {const v=byChat.get(String(x.chat_id));if(v){v.manual+=Number(x.amount_cents)||0;v.manualCount++;v.sales.push(x);}}
+  for(const x of payments??[]) {const v=byChat.get(String(x.chat_id));if(v){v.verified+=Math.round(Number(x.amount)*100)||0;v.verifiedCount++;v.realPayments.push(x);}}
+  crmState={uid,byChat,thresholds:thresholds??{silver_cents:5000,gold_cents:15000,vip_cents:30000}};
+  return crmState;
+}
+function crmCardBadge(c) {
+  const v=crmAccountFor(c.id),r=crmRole(c),total=v.manual+v.verified;
+  const display=total?`${crmMoney(total)} suivis`:'Aucun achat suivi';
+  return `<div class="crm-card-meta"><span class="crm-role crm-role-${r.role}">${CRM_LABELS[r.role]}${r.overridden?' (manuel)':''}</span><span class="crm-card-spend">${esc(display)}</span></div>`;
+}
+function crmContactHtml(c) {
+  const v=crmAccountFor(c.id),r=crmRole(c),p=v.profile,t=crmThresholds();
+  const totals=v.verified+v.manual;
+  const history=v.sales.slice(0,20).map(x=>`<li><span>${esc(x.note||'Achat saisi')} · ${fmtDate(x.created_at,false)}</span><strong>${crmMoney(x.amount_cents)}</strong> <button type="button" class="btn-sm crm-remove-sale" data-id="${esc(x.id)}">Supprimer</button></li>`).join('');
+  const verified=v.realPayments.slice(0,8).map(x=>`<li><span>Paiement Dropp confirmé · ${fmtDate(x.confirmed_at,false)}</span><strong>${crmMoney(Math.round(Number(x.amount)*100))}</strong></li>`).join('');
+  return `<section class="crm-wrap" aria-label="Fiche client"><div class="crm-heading"><h3>Fiche client</h3><span class="crm-role crm-role-${r.role}">${CRM_LABELS[r.role]}${r.overridden?' · rôle attribué':''}</span></div>
+    <div class="crm-kpis">
+      <div><small>Total suivi</small><strong>${crmMoney(totals)}</strong></div>
+      <div><small>Achat(s) saisi(s)</small><strong>${crmMoney(v.manual)}</strong></div>
+      <div><small>Vérifié par Dropp</small><strong>${crmMoney(v.verified)}</strong></div>
+      <div><small>Nombre d'achats suivis</small><strong>${v.manualCount+v.verifiedCount}</strong></div>
+    </div>
+    <p class="crm-disclaimer">Les achats saisis manuellement ne sont pas des paiements vérifiés. La synchronisation automatique avec dropp.fans doit encore être configurée.</p>
+    <details class="crm-fold" open><summary>Informations sur le contact</summary>
+      <form id="crm-profile" class="crm-form">
+        <label>Nom interne<input id="crm-nickname" maxlength="80" placeholder="Surnom pour retrouver ce contact" value="${esc(p.nickname||'')}"></label>
+        <label>Étiquettes (séparées par des virgules)<input id="crm-tags" maxlength="250" placeholder="Fidèle, à relancer, prioritaire" value="${esc((p.tags||[]).join(', '))}"></label>
+        <label>Rôle<select id="crm-override">
+          <option value="" ${!p.role_override?'selected':''}>Automatique selon les achats</option>
+          ${['none','bronze','silver','gold','vip'].map(x=>`<option value="${x}" ${p.role_override===x?'selected':''}>${CRM_LABELS[x]} (manuel)</option>`).join('')}
+        </select></label>
+        <label class="crm-wide">Notes privées<textarea id="crm-notes" maxlength="2000" rows="3" placeholder="Informations pratiques, sans données sensibles">${esc(p.notes||'')}</textarea></label>
+        <div class="crm-wide"><button type="submit" class="btn-primary">Enregistrer la fiche</button></div>
+      </form>
+    </details>
+    <details class="crm-fold"><summary>Achats et fidélité</summary>
+      <form id="crm-sale" class="crm-form">
+        <label>Montant saisi (€)<input id="crm-sale-amount" type="number" min="0.01" max="100000" step="0.01" placeholder="19.90" required></label>
+        <label>Libellé<input id="crm-sale-note" maxlength="120" placeholder="Lien Dropp - Pack photo" required></label>
+        <div class="crm-wide"><button type="submit" class="btn-primary">Enregistrer un achat manuel</button></div>
+      </form>
+      <h4>Historique saisi</h4><ul class="crm-history">${history||'<li>Aucun achat enregistré manuellement.</li>'}</ul>
+      <h4>Paiements vérifiés</h4><ul class="crm-history">${verified||'<li>Aucun paiement Dropp synchronisé.</li>'}</ul>
+    </details>
+    <details class="crm-fold"><summary>Configurer les seuils des rôles</summary>
+      <p class="small muted">Bronze à partir de 1 €. Les montants des rôles se basent sur le total suivi (vérifié + déclaré). Les changements concernent toutes tes discussions.</p>
+      <form id="crm-thresholds" class="crm-form">
+        <label>Argent, à partir de (€)<input id="crm-silver" type="number" step="0.01" min="1.01" max="999999" required value="${(t.silver_cents/100).toFixed(2)}"></label>
+        <label>Or, à partir de (€)<input id="crm-gold" type="number" step="0.01" min="1.01" max="999999" required value="${(t.gold_cents/100).toFixed(2)}"></label>
+        <label>VIP, à partir de (€)<input id="crm-vip" type="number" step="0.01" min="1.01" max="999999" required value="${(t.vip_cents/100).toFixed(2)}"></label>
+        <div class="crm-wide"><button type="submit" class="btn-primary">Enregistrer les seuils</button></div>
+      </form>
+    </details>
+  </section>`;
+}
+function crmBindDetail(c) {
+  $('#crm-profile')?.addEventListener('submit',async e=>{
+    e.preventDefault();const btn=$('#crm-profile button[type=submit]');btn.disabled=true;
+    try {
+      const nickname=$('#crm-nickname').value.trim().slice(0,80)||null;
+      const notes=$('#crm-notes').value.trim().slice(0,2000)||null;
+      const tags=[...new Set($('#crm-tags').value.split(',').map(s=>s.trim()).filter(Boolean))].slice(0,8);
+      if(tags.some(t=>t.length>32))throw new Error('Étiquette limitée à 32 caractères');
+      const override=$('#crm-override').value||null;
+      await q(sb.from('crm_contact_profiles').upsert({user_id:state.session.user.id,chat_id:c.id,nickname,notes,tags,role_override:override},{onConflict:'chat_id'}));
+      toast('Fiche client enregistrée');render();
+    }catch(err){fail(err);}finally{btn.disabled=false;}
+  });
+  $('#crm-sale')?.addEventListener('submit',async e=>{
+    e.preventDefault();const btn=$('#crm-sale button[type=submit]');btn.disabled=true;
+    try{
+      const cents=crmSafeCents($('#crm-sale-amount').value);
+      const note=$('#crm-sale-note').value.trim().slice(0,120);
+      if(!note)throw new Error('Indique un libellé pour cet achat');
+      await q(sb.from('crm_manual_sales').insert({user_id:state.session.user.id,chat_id:c.id,amount_cents:cents,note}));
+      toast('Achat manuel ajouté (non vérifié par Dropp)');render();
+    }catch(err){fail(err);}finally{btn.disabled=false;}
+  });
+  $$('.crm-remove-sale').forEach(b=>b.addEventListener('click',async()=>{
+    if(!confirm('Supprimer cet achat saisi manuellement ?'))return;
+    try{await q(sb.from('crm_manual_sales').delete().eq('id',b.dataset.id).eq('chat_id',c.id));toast('Achat manuel supprimé');render();}catch(err){fail(err);}
+  }));
+  $('#crm-thresholds')?.addEventListener('submit',async e=>{
+    e.preventDefault();const btn=$('#crm-thresholds button[type=submit]');btn.disabled=true;
+    try{
+      const silver=crmSafeCents($('#crm-silver').value),gold=crmSafeCents($('#crm-gold').value),vip=crmSafeCents($('#crm-vip').value);
+      if(!(100<silver&&silver<gold&&gold<vip))throw new Error('Seuils requis : Bronze < Argent < Or < VIP');
+      await q(sb.from('crm_tier_settings').upsert({user_id:state.session.user.id,silver_cents:silver,gold_cents:gold,vip_cents:vip}));
+      toast('Seuils enregistrés');render();
+    }catch(err){fail(err);}finally{btn.disabled=false;}
+  });
+}
+function crmListFilters(chats) {
+  const search=$('#search'),filter=$('#crm-role-filter'),sort=$('#crm-sort'),list=$('#list');
+  if(!search||!filter||!sort||!list)return;
+  const run=()=>{
+    const query=search.value.trim().toLowerCase();
+    let els=$$('.convo',list);
+    els.sort((a,b)=>{
+      const x=chats.find(c=>String(c.id)===a.dataset.id),y=chats.find(c=>String(c.id)===b.dataset.id);
+      const pin=(Number(y?.pinned||0)-Number(x?.pinned||0));if(pin)return pin;
+      if(sort.value==='spend')return (crmAccountFor(y.id).manual+crmAccountFor(y.id).verified)-(crmAccountFor(x.id).manual+crmAccountFor(x.id).verified);
+      if(sort.value==='name')return String(x.title).localeCompare(String(y.title),'fr');
+      return new Date(y.last_message_at||0)-new Date(x.last_message_at||0);
+    });
+    els.forEach(li=>list.appendChild(li));
+    for(const li of els){
+      const c=chats.find(c=>String(c.id)===li.dataset.id),a=crmAccountFor(c.id),role=crmRole(c).role;
+      let ok=true;if(query&&!li.dataset.q.includes(query))ok=false;
+      if(filter.value==='buyers' && a.manual+a.verified<=0)ok=false;
+      if(filter.value==='none' && a.manual+a.verified>0)ok=false;
+      if(['bronze','silver','gold','vip'].includes(filter.value)&&role!==filter.value)ok=false;
+      li.classList.toggle('hidden',!ok);
+    }
+  };
+  search.oninput=run;filter.addEventListener('change',run);sort.addEventListener('change',run);run();
+}
+// ---------- Fin CRM ----------
 
 // ---------- Statistiques ----------
 async function viewStats(main) {
