@@ -288,7 +288,7 @@ function renderNewPassword() {
 // ---------- Tableau de bord : coquille ----------
 const SECTIONS = [
   ["accueil", "Accueil"], ["controle", "Contrôle IA"], ["conversations", "Conversations"], ["stats", "Statistiques"],
-  ["apprentissage", "Apprentissage"], ["liens", "Liens de vente"], ["photos", "Photos privées"], ["compte", "Mon compte"],
+  ["apprentissage", "Apprentissage"], ["liens", "Liens de vente"], ["preview-sales", "Aperçus & ventes"], ["photos", "Photos privées"], ["compte", "Mon compte"],
 ];
 
 async function renderApp(section) {
@@ -316,7 +316,7 @@ async function renderApp(section) {
   });
   const main = $("#main");
   const views = { accueil: viewHome, controle: viewControl, conversations: viewConvos, stats: viewStats,
-    apprentissage: viewLearn, liens: viewLinks, photos: viewPhotos, compte: viewAccount, admin: viewAdmin };
+    apprentissage: viewLearn, liens: viewLinks, "preview-sales": viewPreviewSales, photos: viewPhotos, compte: viewAccount, admin: viewAdmin };
   await views[section](main);
 }
 
@@ -1352,6 +1352,112 @@ async function viewPhotos(main) {
     }));
   }
   if(photoVaultPin)await gallery();else gate();
+}
+
+// ---------- Aperçus & ventes : contrôle manuel, aucune relance automatique ----------
+async function previewSalesCall(action, extra = {}) {
+  const {data,error}=await sb.functions.invoke('preview-sales',{
+    body: extra instanceof FormData ? extra : {action,...extra}
+  });
+  if(error){
+    let msg=error.message;
+    try{const parsed=await error.context.json();msg=parsed.error||msg;}catch(_){/* noop */}
+    throw Error(msg);
+  }
+  if(data?.error)throw Error(data.error);
+  return data;
+}
+async function viewPreviewSales(main){
+  main.innerHTML=`${head('Aperçus & ventes','Prépare une photo non explicite, puis propose une offre après accord du contact.')}
+    <section class="panel"><p class="muted">Chargement des paramètres…</p></section>`;
+  let config,chats;
+  try{
+    [config,chats]=await Promise.all([
+      previewSalesCall('status'),
+      q(sb.from('chats').select('id,title,username,ai_stopped').order('last_message_at',{ascending:false}).limit(200))
+    ]);
+  }catch(e){main.innerHTML=`${head('Aperçus & ventes','Configuration')}
+    <section class="panel"><p>Impossible de charger le module. Vérifie le déploiement de la fonction Supabase <code>preview-sales</code>.</p></section>`;fail(e);return;}
+  const settings=config.settings??{},links=config.links??[];
+  const current=links.find(l=>String(l.id)===String(settings.active_link_id));
+  main.innerHTML=`${head('Aperçus & ventes','Garde le contrôle des aperçus et des liens proposés.')}
+    <section class="panel">
+      <div class="panel-head"><div><h2>Configuration</h2><p>Activation générale et messages personnalisables.</p></div><span class="tag ${settings.enabled?'ok':'warn'}">${settings.enabled?'Activé':'Désactivé'}</span></div>
+      <form id="preview-config" class="field">
+        <label style="display:flex;align-items:center;gap:10px"><input type="checkbox" id="pc-enabled" ${settings.enabled?'checked':''}> Autoriser les envois depuis cette page</label>
+        <label for="pc-caption">Légende de la photo gratuite</label>
+        <textarea id="pc-caption" maxlength="300" rows="2" required>${esc(settings.preview_caption||'Voici un aperçu gratuit, comme demandé.')}</textarea>
+        <label for="pc-intro">Message précédant le lien</label>
+        <textarea id="pc-intro" maxlength="300" rows="2" required>${esc(settings.offer_intro||'Voici les détails de cette offre :')}</textarea>
+        <label for="pc-link">Lien de vente configuré</label>
+        <select id="pc-link"><option value="">Aucun</option>${links.map(l=>`<option value="${l.id}" ${String(l.id)===String(settings.active_link_id)?'selected':''}>${esc(l.title)}${l.price_label?' — '+esc(l.price_label):''}${l.adult_only?' (18+)':''}</option>`).join('')}</select>
+        <button class="btn-primary" type="submit">Enregistrer les réglages</button>
+      </form>
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <div class="panel-head"><div><h2>Photo d'aperçu</h2><p>Image non explicite, dont tu possèdes les droits.</p></div><span class="tag ${settings.preview_image_path?'ok':'warn'}">${settings.preview_image_path?'Disponible':'À ajouter'}</span></div>
+      <form id="pc-upload" class="row" style="gap:12px;align-items:end">
+        <div class="grow"><label for="pc-file">Choisir une photo (JPG, PNG ou WebP, 5 Mo max)</label><input type="file" id="pc-file" accept="image/jpeg,image/png,image/webp" required></div>
+        <button class="btn-sm" type="submit">Ajouter / remplacer</button>
+      </form>
+      <p class="hint">Les photos du coffre-fort privé ne sont jamais partagées directement. Cet aperçu est un fichier séparé.</p>
+      <div id="pc-photo"></div>
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <div class="panel-head"><div><h2>Envoyer à un contact</h2><p>Aucun envoi automatique dans cette version : validation obligatoire.</p></div></div>
+      <div class="field">
+        <label for="pc-chat">Conversation Telegram</label>
+        <select id="pc-chat"><option value="">Choisir un contact</option>${chats.filter(c=>!c.ai_stopped).map(c=>`<option value="${c.id}">${esc(c.title||c.username||String(c.id))}</option>`).join('')}</select>
+        <label style="display:flex;gap:8px;align-items:center"><input id="pc-consent" type="checkbox"> Ce contact a demandé et accepté cet envoi.</label>
+        <label style="display:flex;gap:8px;align-items:center"><input id="pc-age" type="checkbox"> Pour un lien adulte : âge et accès vérifiés par la plateforme.</label>
+        <div class="row" style="gap:12px"><button type="button" id="pc-send-photo" class="btn-sm">Envoyer la preview</button>
+          <button type="button" id="pc-send-offer" class="btn-sm">Envoyer le lien</button></div>
+        <p class="hint">Un aperçu et un lien maximum par contact. Aucune relance si la personne refuse. N'envoie jamais de contenu adulte à une personne mineure ou non vérifiée.</p>
+        <div id="pc-log"></div>
+      </div>
+    </section>`;
+  const photoContainer=$('#pc-photo');
+  if(settings.preview_image_path){
+    try{const {url}=await previewSalesCall('preview_url');
+      photoContainer.innerHTML=`<img src="${esc(url)}" alt="Photo d'aperçu" style="max-width:240px;max-height:220px;object-fit:cover;border-radius:12px;margin-top:12px">`;
+    }catch(e){photoContainer.textContent='Aperçu temporairement indisponible';}
+  }
+  $('#preview-config').addEventListener('submit',async e=>{
+    e.preventDefault();const btn=$('#preview-config button');btn.disabled=true;
+    try{await previewSalesCall('configure',{
+      enabled:$('#pc-enabled').checked,
+      preview_caption:$('#pc-caption').value.trim(),offer_intro:$('#pc-intro').value.trim(),
+      active_link_id:$('#pc-link').value?Number($('#pc-link').value):null
+    });toast('Réglages enregistrés');await viewPreviewSales(main);}catch(err){fail(err);btn.disabled=false;}
+  });
+  $('#pc-upload').addEventListener('submit',async e=>{
+    e.preventDefault();const file=$('#pc-file').files?.[0];if(!file)return;
+    if(file.size>5242880)return toast('5 Mo maximum',true);
+    const btn=$('#pc-upload button');btn.disabled=true;
+    const form=new FormData();form.append('action','upload_preview');form.append('file',file);
+    try{await previewSalesCall('upload_preview',form);toast('Photo d’aperçu enregistrée');await viewPreviewSales(main);}catch(err){fail(err);btn.disabled=false;}
+  });
+  async function send(action){
+    const chat=$('#pc-chat').value;
+    if(!chat)return toast('Sélectionne un contact',true);
+    if(!$('#pc-consent').checked)return toast('Confirme la demande du contact',true);
+    if(action==='send_offer'&&!$('#pc-age').checked)return toast('Vérification d’âge et accès requis pour le lien',true);
+    if(!confirm(action==='send_preview'?'Envoyer cette photo à ce contact sur Telegram ?':'Envoyer ce lien commercial à ce contact sur Telegram ?'))return;
+    const btn=$('#pc-send-'+(action==='send_preview'?'photo':'offer'));btn.disabled=true;
+    try{await previewSalesCall(action,{chat_id:Number(chat),owner_approved:true,consent_confirmed:true,
+      platform_age_verified:$('#pc-age').checked});toast('Message envoyé sur Telegram');$('#pc-consent').checked=false;
+      await refreshHistory(chat);}catch(err){fail(err);}finally{btn.disabled=false;}
+  }
+  async function refreshHistory(chatId){
+    if(!chatId){$('#pc-log').innerHTML='';return;}
+    try{const {history}=await previewSalesCall('contact_history',{chat_id:Number(chatId)});
+      $('#pc-log').innerHTML=`<p class="small muted">Historique : ${(history??[]).length} action(s)</p>`+
+      (history??[]).map(x=>`<p class="small">${esc(x.action==='preview'?'Aperçu':'Lien')} · ${esc(x.state)} · ${fmtDate(x.created_at)}</p>`).join('');
+    }catch(err){fail(err);}
+  }
+  $('#pc-chat').addEventListener('change',e=>refreshHistory(e.target.value));
+  $('#pc-send-photo').addEventListener('click',()=>send('send_preview'));
+  $('#pc-send-offer').addEventListener('click',()=>send('send_offer'));
 }
 
 // ---------- Démarrage ----------
