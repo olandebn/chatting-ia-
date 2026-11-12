@@ -9,6 +9,16 @@ const PEPPER = Deno.env.get('PHOTO_VAULT_PEPPER') ?? '';
 const ORIGIN = 'https://olandebn.github.io';
 const BUCKET = 'relais-private-photos';
 const LIMIT = 5 * 1024 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function idOrRoot(value: unknown): string | null | undefined {
+ if(value===null || value===undefined || value==='') return null;
+ return typeof value==='string' && UUID.test(value) ? value : undefined;
+}
+function validName(value: unknown, max: number): string | null {
+ const name=String(value??'').replace(/[\u0000-\u001F\u007F]/g,'').trim();
+ return name.length>=1 && name.length<=max ? name : null;
+}
+
 const CORS = {
  'Access-Control-Allow-Origin': ORIGIN,
  'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
@@ -53,7 +63,7 @@ Deno.serve(async(req)=>{
   let file:File|null=null;
   if(isUpload){
    const form=await req.formData();
-   data={action:form.get('action'),pin:form.get('pin')};
+   data={action:form.get('action'),pin:form.get('pin'),name:form.get('name'),folder_id:form.get('folder_id')};
    file=form.get('file') instanceof File ? form.get('file') as File : null;
   } else data=await req.json();
   const action=String(data?.action??'');
@@ -81,20 +91,97 @@ Deno.serve(async(req)=>{
      check?.error==='locked'?429:403);
   }
   if(action==='setup'||action==='unlock') return reply({ok:true});
+  // Toutes les operations de dossiers demandent le PIN et sont liees au compte authentifie.
+  if(action==='create_folder') {
+   const folderName=validName(data?.name,80);
+   const parent=idOrRoot(data?.parent_id);
+   if(!folderName || parent===undefined) return reply({error:'Nom ou dossier parent invalide'},400);
+   if(parent) {
+    const {data:owned}=await admin.from('photo_vault_folders').select('id')
+     .eq('user_id',uid).eq('id',parent).maybeSingle();
+    if(!owned) return reply({error:'Dossier parent introuvable'},404);
+   }
+   const {error}=await admin.from('photo_vault_folders').insert({
+    user_id:uid,name:folderName,parent_id:parent,
+   });
+   if(error) return reply({error:error.code==='23505'?'Ce nom existe deja dans ce dossier':'Creation du dossier impossible'},error.code==='23505'?409:503);
+   return reply({ok:true});
+  }
+  if(action==='rename_folder') {
+   const folderId=idOrRoot(data?.id),name=validName(data?.name,80);
+   if(!folderId || !name) return reply({error:'Dossier ou nom invalide'},400);
+   const {data:row,error}=await admin.from('photo_vault_folders')
+    .update({name,updated_at:new Date().toISOString()})
+    .eq('user_id',uid).eq('id',folderId).select('id').maybeSingle();
+   if(error) return reply({error:error.code==='23505'?'Ce nom existe deja':'Renommage impossible'},error.code==='23505'?409:503);
+   return row?reply({ok:true}):reply({error:'Dossier introuvable'},404);
+  }
+  if(action==='delete_folder') {
+   const folderId=idOrRoot(data?.id);
+   if(!folderId) return reply({error:'Dossier invalide'},400);
+   const {data:items,error:itemsError}=await admin.from('photo_vault_items').select('id')
+    .eq('user_id',uid).eq('folder_id',folderId).limit(1);
+   const {data:children,error:childError}=await admin.from('photo_vault_folders').select('id')
+    .eq('user_id',uid).eq('parent_id',folderId).limit(1);
+   if(itemsError||childError) return reply({error:'Impossible de verifier le dossier'},503);
+   if(items?.length||children?.length) return reply({error:'Ce dossier contient des photos ou des sous-dossiers. Vide-le avant de le supprimer.'},409);
+   const {data:row,error}=await admin.from('photo_vault_folders').delete()
+    .eq('user_id',uid).eq('id',folderId).select('id').maybeSingle();
+   if(error) return reply({error:'Dossier non vide ou suppression impossible'},409);
+   return row?reply({ok:true}):reply({error:'Dossier introuvable'},404);
+  }
+  if(action==='rename_item') {
+   const itemId=idOrRoot(data?.id),name=validName(data?.name,120);
+   if(!itemId||!name) return reply({error:'Photo ou nom invalide'},400);
+   const {data:row,error}=await admin.from('photo_vault_items').update({display_name:name})
+     .eq('user_id',uid).eq('id',itemId).select('id').maybeSingle();
+   if(error) return reply({error:'Renommage impossible'},503);
+   return row?reply({ok:true}):reply({error:'Photo introuvable'},404);
+  }
+  if(action==='move_item') {
+   const itemId=idOrRoot(data?.id),folderId=idOrRoot(data?.folder_id);
+   if(!itemId||folderId===undefined) return reply({error:'Photo ou destination invalide'},400);
+   if(folderId) {
+    const {data:owned}=await admin.from('photo_vault_folders').select('id')
+     .eq('user_id',uid).eq('id',folderId).maybeSingle();
+    if(!owned) return reply({error:'Dossier de destination introuvable'},404);
+   }
+   const {data:row,error}=await admin.from('photo_vault_items').update({folder_id:folderId})
+    .eq('user_id',uid).eq('id',itemId).select('id').maybeSingle();
+   if(error) return reply({error:'Deplacement impossible'},503);
+   return row?reply({ok:true}):reply({error:'Photo introuvable'},404);
+  }
   if(action==='list') {
-   const {data:rows,error}=await admin.from('photo_vault_items').select('id,storage_path,display_name,mime_type,bytes,created_at')
-    .eq('user_id',uid).order('created_at',{ascending:false}).limit(100);
+   const folderId=idOrRoot(data?.folder_id);
+   if(folderId===undefined) return reply({error:'Dossier invalide'},400);
+   const {data:allFolders,error:foldersError}=await admin.from('photo_vault_folders')
+    .select('id,parent_id,name,created_at').eq('user_id',uid).order('name',{ascending:true}).limit(500);
+   if(foldersError) return reply({error:'Impossible de charger les dossiers'},503);
+   if(folderId && !(allFolders??[]).some(f=>f.id===folderId))
+    return reply({error:'Dossier introuvable'},404);
+   let query=admin.from('photo_vault_items')
+    .select('id,storage_path,display_name,mime_type,bytes,folder_id,created_at')
+    .eq('user_id',uid).order('created_at',{ascending:false}).limit(200);
+   query=folderId?query.eq('folder_id',folderId):query.is('folder_id',null);
+   const {data:rows,error}=await query;
    if(error) return reply({error:'Impossible de charger les photos'},503);
    const items=[];
    for(const row of rows??[]){
     const {data:signed}=await admin.storage.from(BUCKET).createSignedUrl(row.storage_path,300);
-    items.push({id:row.id,name:row.display_name,bytes:row.bytes,created_at:row.created_at,
-      signed_url:signed?.signedUrl??null});
+    items.push({id:row.id,name:row.display_name,bytes:row.bytes,folder_id:row.folder_id,
+      created_at:row.created_at,signed_url:signed?.signedUrl??null});
    }
-   return reply({items});
+   return reply({items,folders:(allFolders??[]).filter(f=>f.parent_id===folderId),all_folders:allFolders??[]});
   }
   if(action==='upload') {
    if(!file||file.size===0||file.size>LIMIT) return reply({error:'Photo invalide ou supérieure à 5 Mo'},400);
+   const folderId=idOrRoot(data?.folder_id);
+   if(folderId===undefined) return reply({error:'Dossier invalide'},400);
+   if(folderId) {
+    const {data:owned}=await admin.from('photo_vault_folders').select('id')
+     .eq('user_id',uid).eq('id',folderId).maybeSingle();
+    if(!owned) return reply({error:'Dossier introuvable'},404);
+   }
    if(!['image/jpeg','image/png','image/webp'].includes(file.type))
     return reply({error:'Formats acceptés : JPG, PNG et WebP'},400);
    const bytes=new Uint8Array(await file.arrayBuffer());
@@ -105,9 +192,9 @@ Deno.serve(async(req)=>{
    const {error:uploadError}=await admin.storage.from(BUCKET)
     .upload(path,bytes,{contentType:mime,cacheControl:'60',upsert:false});
    if(uploadError) return reply({error:'Enregistrement de la photo impossible'},503);
-   const name=String(file.name||'Photo').slice(0,120).replace(/[\u0000-\u001F]/g,'').trim()||'Photo';
+   const name=validName(data?.name,120)??validName(file.name,120)??'Photo';
    const {error:dbError}=await admin.from('photo_vault_items').insert({
-     user_id:uid,storage_path:path,display_name:name,mime_type:mime,bytes:file.size,
+     user_id:uid,storage_path:path,display_name:name,mime_type:mime,bytes:file.size,folder_id:folderId,
    });
    if(dbError){await admin.storage.from(BUCKET).remove([path]);return reply({error:'Métadonnées non enregistrées'},503)}
    return reply({ok:true});

@@ -1013,106 +1013,191 @@ function renderGuide() {
   </article>${siteFoot()}`;
 }
 
-// ---------- Galerie privée : authentification + PIN côté serveur ----------
-// Aucun PIN et aucune photo ne sont stockés dans localStorage ou sur GitHub Pages.
+// ---------- Galerie privee V2 : dossiers, noms, apercus masques ----------
+// Les fichiers et le PIN restent sur Supabase ; aucune image n'est chargee avant de saisir le PIN.
 let photoVaultPin = null;
 let photoVaultOwner = null;
-async function photoVaultRequest(action, pin = null, file = null, id = null) {
+async function photoVaultRequest(action, pin = null, fields = {}, file = null) {
   let body;
   if (file) {
     body = new FormData();
     body.append('action', action);
     body.append('pin', pin);
+    for (const [key,value] of Object.entries(fields)) body.append(key,value??'');
     body.append('file', file, file.name);
-  } else body = { action, ...(pin !== null ? {pin} : {}), ...(id ? {id} : {}) };
-  const {data,error} = await sb.functions.invoke('photo-vault', {body});
-  if (error) {
-    let message = error.message;
-    try {
-      const detail = await error.context?.json();
-      if (detail?.error) message = detail.error;
-    } catch (_) { /* aucun détail supplémentaire */ }
-    throw new Error(message || 'Galerie indisponible');
+  } else body = {action, ...(pin !== null ? {pin} : {}), ...fields};
+  const {data,error} = await sb.functions.invoke('photo-vault',{body});
+  if(error) {
+    let message=error.message;
+    try {const detail=await error.context?.json();if(detail?.error)message=detail.error;}catch(_){}
+    throw new Error(message||'Galerie indisponible');
   }
-  if (data?.error) throw new Error(data.error);
+  if(data?.error)throw new Error(data.error);
   return data;
 }
 async function viewPhotos(main) {
-  const uid = state.session?.user?.id;
-  if (photoVaultOwner !== uid) { photoVaultOwner = uid; photoVaultPin = null; }
-  main.innerHTML = `${head('Photos privées', 'Tes photos générées, protégées par un code à 4 chiffres.')}
+  const uid=state.session?.user?.id;
+  if(photoVaultOwner!==uid){photoVaultOwner=uid;photoVaultPin=null;}
+  let currentFolder=null;
+  let configured=false;
+  main.innerHTML=`${head('Photos privées','Classe tes images par dossiers. Les aperçus sont floutés par défaut.')}
     <section class="panel"><div id="vault-content"><p class="muted">Chargement de la galerie…</p></div></section>`;
-  const area = $('#vault-content');
-  let configured;
-  try { configured = (await photoVaultRequest('status')).configured; }
-  catch(e) {
-    area.innerHTML = `<p class="muted">La galerie n'est pas encore activée sur Supabase.</p>`;
-    fail(e); return;
-  }
-  const showGate = () => {
-    if (!configured) {
-      area.innerHTML = `<h2>Créer ton code</h2><p class="muted">Choisis 4 chiffres difficiles à deviner. N'utilise pas 1234.</p>
-        <form id="vault-setup" class="vault-form">
-          <label>Code à 4 chiffres<input id="vault-pin-new" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></label>
-          <label>Confirmer<input id="vault-pin-confirm" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></label>
-          <button class="btn-primary" type="submit">Protéger ma galerie</button></form>`;
-      $('#vault-setup').addEventListener('submit', async(e)=>{
-        e.preventDefault();
-        const pin=$('#vault-pin-new').value;
-        if (pin !== $('#vault-pin-confirm').value) return toast('Les codes ne correspondent pas',true);
-        const btn=$('#vault-setup button'); btn.disabled=true;
-        try {await photoVaultRequest('setup',pin);photoVaultPin=pin;configured=true;await showGallery();}
+  const area=$('#vault-content');
+  try{configured=!!(await photoVaultRequest('status')).configured;}
+  catch(err){area.innerHTML='<p class="muted">La galerie n\'est pas encore disponible sur Supabase.</p>';fail(err);return;}
+  function gate(){
+    currentFolder=null;
+    if(!configured){
+      area.innerHTML=`<div class="vault-gate"><div class="vault-lock-icon">🔐</div><h2>Créer ton code privé</h2>
+        <p class="muted">Choisis 4 chiffres différents des codes trop évidents. Le code est obligatoire pour accéder aux photos et dossiers.</p>
+        <form id="vault-setup" class="vault-form"><label>Code à 4 chiffres
+          <input id="vault-pin-new" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></label>
+          <label>Confirmer le code<input id="vault-pin-confirm" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></label>
+          <button class="btn-primary" type="submit">Protéger ma galerie</button></form></div>`;
+      $('#vault-setup').addEventListener('submit',async(e)=>{
+        e.preventDefault();const pin=$('#vault-pin-new').value;
+        if(pin!==$('#vault-pin-confirm').value)return toast('Les codes ne correspondent pas',true);
+        const btn=$('#vault-setup button');btn.disabled=true;
+        try{await photoVaultRequest('setup',pin);photoVaultPin=pin;configured=true;await gallery();}
         catch(err){fail(err);btn.disabled=false;}
       });
-    } else {
-      area.innerHTML = `<h2>Déverrouiller la galerie</h2>
-        <p class="muted">Entre ton code personnel. Après 5 erreurs, l'accès est bloqué 15 minutes.</p>
+    }else{
+      area.innerHTML=`<div class="vault-gate"><div class="vault-lock-icon">🔒</div><h2>Galerie verrouillée</h2>
+        <p class="muted">Tes photos et tes dossiers sont cachés. Saisis ton code pour y accéder.<br>Après 5 erreurs, le code est bloqué pendant 15 minutes.</p>
         <form id="vault-unlock" class="vault-form"><label>Code à 4 chiffres
-          <input id="vault-pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required>
-          </label><button class="btn-primary" type="submit">Déverrouiller</button></form>`;
+          <input id="vault-pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required></label>
+          <button class="btn-primary" type="submit">Déverrouiller</button></form></div>`;
       $('#vault-unlock').addEventListener('submit',async(e)=>{
-        e.preventDefault(); const btn=$('#vault-unlock button');btn.disabled=true;
+        e.preventDefault();const btn=$('#vault-unlock button');btn.disabled=true;
         const pin=$('#vault-pin').value;
-        try{await photoVaultRequest('unlock',pin);photoVaultPin=pin;await showGallery();}
+        try{await photoVaultRequest('unlock',pin);photoVaultPin=pin;await gallery();}
         catch(err){photoVaultPin=null;fail(err);btn.disabled=false;}
       });
     }
+  }
+  const pathLabel=(folder,all)=>{
+    const names=[],seen=new Set();let x=folder;
+    for(let n=0;x&&n<12;n++){
+      if(seen.has(x.id))break;seen.add(x.id);names.unshift(x.name);
+      x=all.find(z=>z.id===x.parent_id);
+    }
+    return names.join(' / ');
   };
-  const showGallery = async () => {
-    let items;
-    try {items=(await photoVaultRequest('list',photoVaultPin)).items??[];}
-    catch(err){photoVaultPin=null;showGate();fail(err);return;}
-    area.innerHTML = `<div class="vault-toolbar">
-       <div><h2>Ma galerie</h2><p class="muted">${items.length} photo(s) · JPG, PNG, WebP · 5 Mo maximum par photo</p></div>
-       <button class="btn-sm" id="vault-lock">Verrouiller</button>
+  async function gallery(){
+    let result;
+    try{result=await photoVaultRequest('list',photoVaultPin,{folder_id:currentFolder});}
+    catch(err){photoVaultPin=null;gate();fail(err);return;}
+    const items=result.items??[],folders=result.folders??[],all=result.all_folders??[];
+    const chain=[],used=new Set();let f=all.find(x=>x.id===currentFolder);
+    for(let i=0;f&&i<12;i++){
+      if(used.has(f.id))break;used.add(f.id);chain.unshift(f);f=all.find(x=>x.id===f.parent_id);
+    }
+    const foldersSelect=`<option value="">📁 Racine</option>${all.map(f=>
+      `<option value="${esc(f.id)}">${esc(pathLabel(f,all))}</option>`).join('')}`;
+    area.innerHTML=`<div class="vault-topbar">
+        <div><h2>Ma galerie privée</h2><p class="muted">Photos masquées par défaut · ${items.length} photo(s) dans ce dossier</p></div>
+        <div class="vault-top-actions"><button type="button" class="btn-sm" id="vault-new-folder">+ Nouveau dossier</button>
+        <button type="button" class="btn-sm" id="vault-lock">🔒 Verrouiller</button></div>
       </div>
-      <form class="vault-upload" id="vault-upload"><label>Ajouter une photo générée
-        <input id="vault-file" type="file" accept="image/jpeg,image/png,image/webp" required>
-       </label><button class="btn-primary" type="submit">Ajouter à ma galerie</button></form>
-      <div class="vault-gallery">${items.length ? items.map(item=>`
-       <article class="vault-item">
-         ${item.signed_url ? `<a href="${esc(item.signed_url)}" target="_blank" rel="noopener noreferrer" title="Afficher l'image">
-           <img src="${esc(item.signed_url)}" loading="lazy" alt="${esc(item.name)}"></a>` : '<div class="vault-missing">Image temporairement indisponible</div>'}
-         <div class="vault-item-info"><span title="${esc(item.name)}">${esc(item.name)}</span>
-           <button class="btn-sm vault-delete" data-id="${esc(item.id)}" type="button">Supprimer</button></div>
-       </article>`).join('') : `<div class="empty">Aucune photo. Ajoute ta première image avec le bouton ci-dessus.</div>`}</div>
-      <p class="small muted">Les aperçus utilisent des liens temporaires. Actualise la galerie si un aperçu expire.</p>`;
-    $('#vault-lock').addEventListener('click',()=>{photoVaultPin=null;showGate();});
-    $('#vault-upload').addEventListener('submit',async(e)=>{
-      e.preventDefault(); const file=$('#vault-file').files?.[0]; if(!file)return;
-      if(file.size>5*1024*1024)return toast('La photo dépasse 5 Mo',true);
-      const btn=$('#vault-upload button');btn.disabled=true;
-      try{await photoVaultRequest('upload',photoVaultPin,file);toast('Photo enregistrée');await showGallery();}
-      catch(err){fail(err);btn.disabled=false;}
+      <nav class="vault-breadcrumbs" aria-label="Emplacement"><button type="button" data-folder="">Mes fichiers</button>
+      ${chain.map(c=>`<span>›</span><button type="button" data-folder="${esc(c.id)}">${esc(c.name)}</button>`).join('')}</nav>
+      <div class="vault-search-wrap"><label for="vault-search">Rechercher dans ce dossier</label>
+        <input id="vault-search" type="search" autocomplete="off" placeholder="Nom d'une photo ou d'un dossier…"></div>
+      ${folders.length ? `<div class="vault-section-title">Dossiers <span>${folders.length}</span></div><div class="vault-folders">
+        ${folders.map(f=>`<div class="vault-folder" data-search="${esc(f.name.toLocaleLowerCase('fr'))}">
+          <button type="button" class="vault-folder-open" data-id="${esc(f.id)}"><span class="vault-folder-icon">📁</span><span class="vault-folder-name">${esc(f.name)}</span></button>
+          <div class="vault-folder-actions"><button type="button" class="btn-sm vault-folder-rename" data-id="${esc(f.id)}" title="Renommer le dossier">Renommer</button>
+          <button type="button" class="btn-sm vault-folder-delete" data-id="${esc(f.id)}" title="Supprimer le dossier vide">Supprimer</button></div>
+        </div>`).join('')}</div>`:''}
+      <form id="vault-upload" class="vault-upload"><div class="vault-upload-title"><strong>Ajouter une photo</strong><small>JPG, PNG, WebP · 5 Mo max</small></div>
+        <label>Fichier<input type="file" id="vault-file" accept="image/jpeg,image/png,image/webp" required></label>
+        <label>Nom de la photo<input type="text" id="vault-photo-name" maxlength="120" placeholder="Ex. Portrait soirée" required></label>
+        <button class="btn-primary" type="submit">Importer</button></form>
+      <div class="vault-section-title">Photos <span>${items.length}</span></div>
+      <div class="vault-gallery">${items.length?items.map(item=>`
+        <article class="vault-item vault-photo" data-search="${esc(String(item.name).toLocaleLowerCase('fr'))}">
+          <div class="vault-image-wrap">
+            ${item.signed_url?`<img class="vault-thumbnail" src="${esc(item.signed_url)}" loading="lazy" alt="Aperçu masqué">
+              <div class="vault-blur-overlay"><span>🔒 Aperçu masqué</span></div>`:
+              `<div class="vault-missing">Aperçu indisponible</div>`}
+          </div>
+          <div class="vault-item-body"><strong title="${esc(item.name)}">${esc(item.name)}</strong>
+           <div class="vault-item-buttons"><button type="button" class="btn-sm vault-reveal" ${item.signed_url?'':'disabled'}>👁 Afficher</button>
+             ${item.signed_url?`<a href="${esc(item.signed_url)}" target="_blank" rel="noopener noreferrer" class="vault-zoom" hidden>Agrandir</a>`:''}
+             <button type="button" class="btn-sm vault-item-rename" data-id="${esc(item.id)}">Renommer</button>
+             <button type="button" class="btn-sm vault-item-delete" data-id="${esc(item.id)}">Supprimer</button></div>
+           <label class="vault-move-label">Déplacer vers
+              <select class="vault-move" data-id="${esc(item.id)}">${foldersSelect}</select></label>
+          </div>
+        </article>`).join(''):'<p class="muted vault-no-items">Aucune photo ici. Importe une image ou ouvre un dossier.</p>'}</div>
+      <p class="small muted vault-footnote">Tes fichiers restent privés. Déverrouiller donne accès à des liens temporaires ; le flou est une protection visuelle, pas un chiffrement.</p>`;
+    $('#vault-lock').addEventListener('click',()=>{photoVaultPin=null;gate();});
+    $$('.vault-breadcrumbs button',area).forEach(btn=>btn.addEventListener('click',()=>{
+      currentFolder=btn.dataset.folder||null;gallery();
+    }));
+    $$('.vault-folder-open',area).forEach(btn=>btn.addEventListener('click',()=>{currentFolder=btn.dataset.id;gallery();}));
+    $('#vault-search').addEventListener('input',(e)=>{
+      const term=e.target.value.trim().toLocaleLowerCase('fr');
+      $$('.vault-folder, .vault-photo',area).forEach(card=>{card.hidden=!!term&&!card.dataset.search.includes(term);});
     });
-    $$('.vault-delete',area).forEach(btn=>btn.addEventListener('click',async()=>{
+    $('#vault-new-folder').addEventListener('click',async()=>{
+      const name=prompt('Nom du nouveau dossier :');if(name===null)return;
+      if(!name.trim()||name.trim().length>80)return toast('Nom entre 1 et 80 caractères',true);
+      try{await photoVaultRequest('create_folder',photoVaultPin,{name:name.trim(),parent_id:currentFolder});
+        toast('Dossier créé');await gallery();}catch(err){fail(err);}
+    });
+    $$('.vault-folder-rename',area).forEach(btn=>btn.addEventListener('click',async()=>{
+      const folder=all.find(f=>f.id===btn.dataset.id);if(!folder)return;
+      const name=prompt('Nouveau nom du dossier :',folder.name);if(name===null)return;
+      if(!name.trim()||name.trim().length>80)return toast('Nom entre 1 et 80 caractères',true);
+      try{await photoVaultRequest('rename_folder',photoVaultPin,{id:folder.id,name:name.trim()});toast('Dossier renommé');await gallery();}
+      catch(err){fail(err);}
+    }));
+    $$('.vault-folder-delete',area).forEach(btn=>btn.addEventListener('click',async()=>{
+      if(!confirm('Supprimer ce dossier ? Il doit être vide.'))return;
+      try{await photoVaultRequest('delete_folder',photoVaultPin,{id:btn.dataset.id});toast('Dossier supprimé');await gallery();}
+      catch(err){fail(err);}
+    }));
+    $('#vault-file').addEventListener('change',()=>{
+      const file=$('#vault-file').files?.[0];if(!file)return;
+      if(!$('#vault-photo-name').value.trim())$('#vault-photo-name').value=file.name.replace(/\.[^.]+$/,'').slice(0,120)||'Photo';
+    });
+    $('#vault-upload').addEventListener('submit',async(e)=>{
+      e.preventDefault();const file=$('#vault-file').files?.[0],name=$('#vault-photo-name').value.trim();
+      if(!file)return;if(file.size>5*1024*1024)return toast('Photo supérieure à 5 Mo',true);
+      if(!name||name.length>120)return toast('Nom entre 1 et 120 caractères',true);
+      const btn=$('#vault-upload button[type=submit]');btn.disabled=true;
+      try{await photoVaultRequest('upload',photoVaultPin,{name,folder_id:currentFolder},file);
+        toast('Photo importée');await gallery();}catch(err){fail(err);btn.disabled=false;}
+    });
+    $$('.vault-reveal',area).forEach(btn=>btn.addEventListener('click',()=>{
+      const card=btn.closest('.vault-photo');const revealed=card.classList.toggle('vault-revealed');
+      btn.textContent=revealed?'🙈 Masquer':'👁 Afficher';
+      const zoom=card.querySelector('.vault-zoom');if(zoom)zoom.hidden=!revealed;
+    }));
+    $$('.vault-item-rename',area).forEach(btn=>btn.addEventListener('click',async()=>{
+      const item=items.find(x=>x.id===btn.dataset.id);if(!item)return;
+      const name=prompt('Nouveau nom de la photo :',item.name);if(name===null)return;
+      if(!name.trim()||name.trim().length>120)return toast('Nom entre 1 et 120 caractères',true);
+      try{await photoVaultRequest('rename_item',photoVaultPin,{id:item.id,name:name.trim()});toast('Photo renommée');await gallery();}
+      catch(err){fail(err);}
+    }));
+    $$('.vault-move',area).forEach(select=>{
+      const item=items.find(x=>x.id===select.dataset.id);select.value=item?.folder_id??'';
+      select.addEventListener('change',async()=>{
+        select.disabled=true;
+        try{await photoVaultRequest('move_item',photoVaultPin,{id:select.dataset.id,folder_id:select.value||null});
+          toast('Photo déplacée');await gallery();}catch(err){fail(err);select.disabled=false;}
+      });
+    });
+    $$('.vault-item-delete',area).forEach(btn=>btn.addEventListener('click',async()=>{
       if(!confirm('Supprimer définitivement cette photo ?'))return;
       btn.disabled=true;
-      try{await photoVaultRequest('delete',photoVaultPin,null,btn.dataset.id);toast('Photo supprimée');await showGallery();}
+      try{await photoVaultRequest('delete',photoVaultPin,{id:btn.dataset.id});toast('Photo supprimée');await gallery();}
       catch(err){fail(err);btn.disabled=false;}
     }));
-  };
-  if(photoVaultPin)await showGallery();else showGate();
+  }
+  if(photoVaultPin)await gallery();else gate();
 }
 
 // ---------- Démarrage ----------
