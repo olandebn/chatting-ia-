@@ -21,7 +21,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
     if (data?.error) { const e = Error(data.error); e.data = data; throw e; }
     return data;
   };
-  const S = { creators: [], accounts: [], media: [], posts: [], urls: {}, creatorId: '', tab: 'overview', configured: false, ai: false, scheduler: { active: false }, isAdmin: false, redirect: '', selected: new Set(), filter: 'all', month: monthStart(new Date()), composer: { mediaId: '', postId: '', caption: '', variants: [], style: 'naturel' }, uploads: [] };
+  const S = { creators: [], accounts: [], media: [], posts: [], urls: {}, creatorId: '', tab: 'overview', configured: false, ai: false, scheduler: { active: false }, isAdmin: false, redirect: '', selected: new Set(), filter: 'all', month: monthStart(new Date()), composer: { mediaId: '', postId: '', caption: '', variants: [], style: 'naturel' }, uploads: [], urlsUpdatedAt: 0 };
   const $ = (s) => main.querySelector(s), $$ = (s) => [...main.querySelectorAll(s)];
   const p = (s) => esc(s ?? '');
   const busy = (b, on) => { if (!b) return; b.disabled = on; b.setAttribute('aria-busy', String(on)); };
@@ -46,8 +46,15 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
     if (!S.creatorId) { S.media = []; S.posts = []; return; }
     const r = await call('dashboard', { creator_id: S.creatorId });
     S.media = r.media || []; S.posts = r.posts || [];
+    // Les URL du bucket privé expirent au bout de 15 min côté V3.
+    if (Date.now() - S.urlsUpdatedAt > 12 * 60_000) { S.urls = {}; S.urlsUpdatedAt = 0; }
     const need = S.media.filter((m) => m.state === 'ready' && !S.urls[m.id]).map((m) => m.id);
-    for (let i = 0; i < need.length; i += 60) { try { Object.assign(S.urls, (await call('media_urls', { creator_id: S.creatorId, media_ids: need.slice(i, i + 60) })).urls || {}); } catch { } }
+    let urlsOk = true;
+    for (let i = 0; i < need.length; i += 60) {
+      try { Object.assign(S.urls, (await call('media_urls', { creator_id: S.creatorId, media_ids: need.slice(i, i + 60) })).urls || {}); }
+      catch { urlsOk = false; }
+    }
+    if (urlsOk) S.urlsUpdatedAt = Date.now();
   }
   async function refresh() { await loadData(); draw(); }
 
@@ -287,7 +294,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
       ev.preventDefault();
       const v = d.querySelector('#sd-at').value, okBox = d.querySelector('#sd-ok').checked, err = d.querySelector('#sd-err');
       if (!v) { err.textContent = 'Choisis une date.'; return; } if (!okBox) { err.textContent = 'Coche la confirmation.'; return; }
-      const at = new Date(v); if (!(at.getTime() > Date.now() + 2 * 60_000)) { err.textContent = 'Choisis une heure au moins 5 minutes dans le futur.'; return; }
+      const at = new Date(v); if (!(at.getTime() > Date.now() + 5 * 60_000)) { err.textContent = 'Choisis une heure au moins 5 minutes dans le futur.'; return; }
       busy(go, true);
       const send = (allow) => call('schedule_post', { creator_id: S.creatorId, post_id: post.id, account_id: a.id, scheduled_at: at.toISOString(), approved_non_explicit: true, allow_repost: allow });
       try {
@@ -382,7 +389,11 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         readComposer(); const c = S.composer;
         if ((c.description || '').trim().length < 3) { toast('Décris la photo en quelques mots', true); return; }
         busy(b, true); b.textContent = 'Génération…';
-        try { const r = await call('generate_captions', { creator_id: S.creatorId, description: c.description, style: c.style, include_question: c.question !== false, regenerate: c.variants.length > 0 }); c.variants = r.variants; draw(); }
+        try {
+          const r = await call('generate_captions', { creator_id: S.creatorId, description: c.description, style: c.style, include_question: c.question !== false, regenerate: c.variants.length > 0 });
+          if (!Array.isArray(r.variants) || !r.variants.length || !r.variants.every((v) => v && typeof v.text === 'string' && Array.isArray(v.hashtags))) throw Error('Format des légendes incompatible avec l’API Social V3');
+          c.variants = r.variants; draw();
+        }
         catch (e) { fail(e); busy(b, false); b.textContent = c.variants.length ? 'Régénérer' : 'Générer 3 légendes'; }
       });
       on('[data-use]', (b) => { readComposer(); S.composer.caption = assemble(S.composer.variants[Number(b.dataset.use)]); draw(); $('#social-caption')?.focus(); });
@@ -415,7 +426,9 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
   // Live refresh while posts are in flight (only while this view is mounted)
   const timer = setInterval(async () => {
     if (!main.isConnected || !main.querySelector('.social-page')) { clearInterval(timer); return; }
-    if (document.hidden || !S.posts.some((x) => ['processing', 'unknown'].includes(x.state) || (x.state === 'scheduled' && Date.parse(x.scheduled_at) < Date.now() + 120_000))) return;
+    if (document.hidden) return;
+    if (Date.now() - S.urlsUpdatedAt > 12 * 60_000 && S.creatorId) { try { await refresh(); } catch { } return; }
+    if (!S.posts.some((x) => ['processing', 'unknown'].includes(x.state) || (x.state === 'scheduled' && Date.parse(x.scheduled_at) < Date.now() + 120_000))) return;
     if (['posts', 'overview', 'calendar'].includes(S.tab)) { try { await refresh(); } catch { } }
   }, 30_000);
 }
