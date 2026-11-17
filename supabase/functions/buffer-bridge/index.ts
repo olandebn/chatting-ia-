@@ -73,22 +73,25 @@ async function listChannels() {
   }
   return channels;
 }
-async function mediaAccessLink(jobId: string, expires: number) {
-  const tag = await sign(`${jobId}:${expires}`);
-  return `${BRIDGE_URL}?media=${encodeURIComponent(jobId)}&expires=${expires}&signature=${tag}`;
+async function mediaAccessLink(jobId: string, mediaId: string, expires: number) {
+  const tag = await sign(`${jobId}:${mediaId}:${expires}`);
+  return `${BRIDGE_URL}?media=${encodeURIComponent(jobId)}&image=${encodeURIComponent(mediaId)}&expires=${expires}&signature=${tag}`;
 }
 
 async function serveMedia(req: Request, url: URL) {
   if (!MEDIA_KEY || !SERVICE) return fail(req, 'Stockage non configuré', 503);
-  const id = url.searchParams.get('media'), expiresStr = url.searchParams.get('expires') || '', signature = url.searchParams.get('signature') || '';
+  const id = url.searchParams.get('media'), imageId = url.searchParams.get('image'), expiresStr = url.searchParams.get('expires') || '', signature = url.searchParams.get('signature') || '';
   const expires = Number(expiresStr), now = Math.floor(Date.now() / 1000);
-  if (!isUuid(id) || !/^\d{10}$/.test(expiresStr) || !Number.isSafeInteger(expires) || expires < now || expires > now + 18 * 24 * 3600 || !(await validSignature(`${id}:${expires}`, signature))) {
+  if (!isUuid(id) || (imageId !== null && !isUuid(imageId)) || !/^\d{10}$/.test(expiresStr) || !Number.isSafeInteger(expires) || expires < now || expires > now + 18 * 24 * 3600 || !(await validSignature(imageId ? `${id}:${imageId}:${expires}` : `${id}:${expires}`, signature))) {
     return fail(req, 'Lien invalide ou expiré', 403);
   }
-  const { data: job, error } = await admin.from('social_buffer_jobs').select('user_id,creator_id,media_id,status,url_expires_at').eq('id', id).maybeSingle();
+  const { data: job, error } = await admin.from('social_buffer_jobs').select('user_id,creator_id,media_id,media_ids,status,url_expires_at').eq('id', id).maybeSingle();
   if (error || !job || !['pending', 'queued', 'uncertain'].includes(job.status)) return fail(req, 'Publication indisponible', 404);
   if (Date.parse(job.url_expires_at) < Date.now() || Math.floor(Date.parse(job.url_expires_at) / 1000) !== expires) return fail(req, 'Lien expiré', 403);
-  const { data: media } = await admin.from('social_media').select('storage_path,mime_type,bytes,state').eq('id', job.media_id).eq('user_id', job.user_id).eq('creator_id', job.creator_id).maybeSingle();
+  const eligibleIds: string[] = Array.isArray(job.media_ids) && job.media_ids.length ? job.media_ids : [job.media_id];
+  const requestedId = imageId || job.media_id;
+  if (!eligibleIds.includes(requestedId)) return fail(req, 'Image non autorisée pour ce carrousel', 403);
+  const { data: media } = await admin.from('social_media').select('storage_path,mime_type,bytes,state').eq('id', requestedId).eq('user_id', job.user_id).eq('creator_id', job.creator_id).maybeSingle();
   if (!media || !['ready', 'archived'].includes(media.state) || media.mime_type !== 'image/jpeg' || media.bytes > MAX_IMAGE_BYTES) return fail(req, 'Photo non disponible', 404);
   const headers = { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=300', 'X-Content-Type-Options': 'nosniff' };
   if (req.method === 'HEAD') return new Response(null, { status: 200, headers });
@@ -132,22 +135,36 @@ async function post(req: Request) {
   if (!Number.isFinite(due.getTime()) || due.getTime() < Date.now() + 10 * 60_000 || due.getTime() > Date.now() + MAX_AHEAD_MS) return fail(req, 'Choisis une date entre 10 minutes et 14 jours');
   const { data: p } = await admin.from('social_posts').select('id,media_id,caption,state,account_id').eq('id', b.post_id).eq('user_id', userId).eq('creator_id', creatorId).maybeSingle();
   if (!p || p.state !== 'draft' || p.account_id) return fail(req, 'Sélectionne un brouillon disponible, non planifié sur Meta');
-  const { data: media } = await admin.from('social_media').select('id,mime_type,bytes,width,height,state,is_synthetic').eq('id', p.media_id).eq('user_id', userId).eq('creator_id', creatorId).maybeSingle();
-  const ratio = media?.width && media?.height ? media.width / media.height : 0;
-  if (!media || media.state !== 'ready' || media.mime_type !== 'image/jpeg' || media.bytes > MAX_IMAGE_BYTES || !media.width || ratio < 0.8 || ratio > 1.91) return fail(req, 'Photo incompatible : JPEG ≤8 Mo et ratio 4:5 à 1,91:1');
+  // Ordered array: first item must be the original draft cover photo.
+  const ids = b.media_ids === undefined ? [p.media_id] : b.media_ids;
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 20 || ids.some((x) => !isUuid(x)) || new Set(ids).size !== ids.length || ids[0] !== p.media_id) {
+    return fail(req, 'Carrousel invalide : 1 à 20 photos distinctes, première photo identique au brouillon');
+  }
+  const { data: allMedia, error: mediaError } = await admin.from('social_media')
+    .select('id,mime_type,bytes,width,height,state,is_synthetic').eq('user_id', userId).eq('creator_id', creatorId).in('id', ids);
+  if (mediaError || !allMedia || allMedia.length !== ids.length) return fail(req, 'Une photo du carrousel est introuvable');
+  const byId = new Map<string, any>(allMedia.map((m: any) => [m.id, m]));
+  const media = ids.map((id: string) => byId.get(id));
+  for (const m of media) {
+    const ratio = m?.width && m?.height ? m.width / m.height : 0;
+    if (!m || m.state !== 'ready' || m.mime_type !== 'image/jpeg' || m.bytes > MAX_IMAGE_BYTES || !m.width || ratio < 0.8 || ratio > 1.91) {
+      return fail(req, 'Une photo est incompatible : JPEG ≤8 Mo, ratio 4:5 à 1,91:1');
+    }
+  }
   if (typeof p.caption !== 'string' || !p.caption.trim() || p.caption.length > 2200) return fail(req, 'Légende invalide');
   const channels = await listChannels();
   const channel = channels.find((x) => x.id === b.channel_id);
   if (!channel) return fail(req, 'Compte Instagram absent ou non connecté à Buffer', 404);
-  const cap = media.is_synthetic && !/#(?:CréatriceVirtuelle|IA)\b/i.test(p.caption) ? p.caption.trim() + '\n\n#CréatriceVirtuelle' : p.caption;
+  const cap = media.some((m: any) => m.is_synthetic) && !/#(?:CréatriceVirtuelle|IA)\b/i.test(p.caption) ? p.caption.trim() + '\n\n#CréatriceVirtuelle' : p.caption;
   const expires = Math.floor(mediaExpirationMs(due) / 1000);
   const { data: job, error: insertError } = await admin.from('social_buffer_jobs').insert({
-    user_id: userId, creator_id: creatorId, source_post_id: p.id, media_id: p.media_id,
+    user_id: userId, creator_id: creatorId, source_post_id: p.id, media_id: p.media_id, media_ids: ids,
     channel_id: channel.id, organization_id: channel.organization_id, caption: cap,
     due_at: due.toISOString(), url_expires_at: new Date(expires * 1000).toISOString(), status: 'pending',
   }).select('id').single();
   if (insertError || !job) return fail(req, insertError?.code === '23505' ? 'Ce brouillon a déjà été envoyé à Buffer (risque de doublon)' : 'Impossible de réserver la publication', 409);
-  const url = await mediaAccessLink(job.id, expires);
+  const urls = await Promise.all(ids.map((id: string) => mediaAccessLink(job.id, id, expires)));
+  const assetList = urls.map((url) => `{ image: { url: ${JSON.stringify(url)} } }`).join(',\n          ');
   const gql = `mutation RelaisCreateImagePost {
     createPost(input: {
       text: ${JSON.stringify(cap)}
@@ -155,7 +172,7 @@ async function post(req: Request) {
       schedulingType: automatic
       mode: customScheduled
       dueAt: ${JSON.stringify(due.toISOString())}
-      assets: [{ image: { url: ${JSON.stringify(url)} } }]
+      assets: [${assetList}]
       metadata: { instagram: { type: post, shouldShareToFeed: true } }
     }) {
       ... on PostActionSuccess { post { id dueAt } }
