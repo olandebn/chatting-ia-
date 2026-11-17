@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import {viewSocialAutomation} from "./social.js?v=buffer-v2-20261117";
+import {viewSocialAutomation} from "./social.js?v=buffer-v2-20261117-tabfix3";
 
 // ---------- Configuration ----------
 const SUPABASE_URL = "https://owbcnkcuxcgsawjqkssk.supabase.co";
