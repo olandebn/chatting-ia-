@@ -156,6 +156,7 @@ async function post(req: Request) {
       mode: customScheduled
       dueAt: ${JSON.stringify(due.toISOString())}
       assets: [{ image: { url: ${JSON.stringify(url)} } }]
+      metadata: { instagram: { type: post, shouldShareToFeed: true } }
     }) {
       ... on PostActionSuccess { post { id dueAt } }
       ... on MutationError { message }
