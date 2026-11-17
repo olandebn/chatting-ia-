@@ -59,7 +59,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
   async function refresh() { await loadData(); draw(); }
 
   // ---------- Layout ----------
-  const TABS = [['overview', 'Vue d’ensemble'], ['accounts', 'Compte Instagram'], ['media', 'Médias'], ['compose', 'Nouvelle publication'], ['posts', 'Publications'], ['calendar', 'Calendrier'], ...(S.isAdmin ? [['buffer', 'Buffer']] : [])];
+  const TABS = () => [['overview', 'Vue d’ensemble'], ['accounts', 'Compte Instagram'], ['media', 'Médias'], ['compose', 'Nouvelle publication'], ['posts', 'Publications'], ['calendar', 'Calendrier'], ...(S.isAdmin ? [['buffer', 'Buffer']] : [])];
   function layout(content) {
     main.innerHTML = `<div class="social-page">
       <div class="main-head"><div><h1>Social Automation</h1><p>Importe tes photos, rédige les légendes avec l’IA et programme tes publications Instagram.</p></div></div>
@@ -68,7 +68,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         <select id="social-creator">${S.creators.length ? '' : '<option value="">Aucun</option>'}${S.creators.map((c) => `<option value="${p(c.id)}" ${c.id === S.creatorId ? 'selected' : ''}>${p(c.name)}</option>`).join('')}</select>
         <button type="button" id="social-new-creator" class="btn-sm">+ Nouveau créateur</button>
         <span class="social-toolbar-status">${igBadge()}</span></section>
-      <nav class="social-tabs" role="tablist" aria-label="Social Automation">${TABS.map(([id, label]) => `<button type="button" role="tab" class="btn-sm ${S.tab === id ? 'social-selected' : ''}" data-tab="${id}" aria-selected="${S.tab === id}">${label}</button>`).join('')}</nav>
+      <nav class="social-tabs" role="tablist" aria-label="Social Automation">${TABS().map(([id, label]) => `<button type="button" role="tab" class="btn-sm ${S.tab === id ? 'social-selected' : ''}" data-tab="${id}" aria-selected="${S.tab === id}">${label}</button>`).join('')}</nav>
       ${content}</div>`;
     $('#social-creator').onchange = async (e) => { S.creatorId = e.target.value; S.selected.clear(); S.composer = { ...S.composer, mediaId: '', postId: '', caption: '', variants: [] }; S.buffer.loaded = false; try { if (S.tab === 'buffer') await loadBuffer(); await refresh(); } catch (err) { fail(err); } };
     $('#social-new-creator').onclick = async () => { const name = prompt('Nom du créateur (ex : Elyna Moreau)'); if (!name?.trim()) return; try { const r = await call('create_creator', { name: name.trim() }); S.creators.push(r.creator); S.creatorId = r.creator.id; await refresh(); toast('Créateur créé'); } catch (e) { fail(e); } };
