@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {viewSocialAutomation} from "./social.js";
 
 // ---------- Configuration ----------
 const SUPABASE_URL = "https://owbcnkcuxcgsawjqkssk.supabase.co";
@@ -288,7 +289,7 @@ function renderNewPassword() {
 // ---------- Tableau de bord : coquille ----------
 const SECTIONS = [
   ["accueil", "Accueil"], ["controle", "Contrôle IA"], ["conversations", "Conversations"], ["stats", "Statistiques"],
-  ["apprentissage", "Apprentissage"], ["liens", "Liens de vente"], ["preview-sales", "Aperçus & ventes"], ["photos", "Photos privées"], ["compte", "Mon compte"],
+  ["apprentissage", "Apprentissage"], ["liens", "Liens de vente"], ["preview-sales", "Aperçus & ventes"], ["social", "Social Automation"], ["photos", "Photos privées"], ["compte", "Mon compte"],
 ];
 
 async function renderApp(section) {
@@ -316,7 +317,7 @@ async function renderApp(section) {
   });
   const main = $("#main");
   const views = { accueil: viewHome, controle: viewControl, conversations: viewConvos, stats: viewStats,
-    apprentissage: viewLearn, liens: viewLinks, "preview-sales": viewPreviewSales, photos: viewPhotos, compte: viewAccount, admin: viewAdmin };
+    apprentissage: viewLearn, liens: viewLinks, "preview-sales": viewPreviewSales, social: (main) => viewSocialAutomation(main,{sb,esc,toast,fail,fmtDate}), photos: viewPhotos, compte: viewAccount, admin: viewAdmin };
   await views[section](main);
 }
 
