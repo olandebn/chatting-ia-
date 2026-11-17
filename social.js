@@ -1,4 +1,4 @@
-// Social Automation V2 — Instagram Autopost. Isolated view; does not touch Telegram services.
+// Social Automation V2 + Buffer Bridge V1. Does not change Telegram, NoTrack or Meta backend.
 // All privileged work happens in the `social-api` Edge Function. No token ever reaches this page.
 const SB_KEY = 'sb_publishable_8vsVUoNdH8ga_LzWX6OynQ_HO2QRPIE';
 const IG_MAX = 8 * 1024 * 1024, MIN_R = 0.8, MAX_R = 1.91;
@@ -21,7 +21,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
     if (data?.error) { const e = Error(data.error); e.data = data; throw e; }
     return data;
   };
-  const S = { creators: [], accounts: [], media: [], posts: [], urls: {}, creatorId: '', tab: 'overview', configured: false, ai: false, scheduler: { active: false }, isAdmin: false, redirect: '', selected: new Set(), filter: 'all', month: monthStart(new Date()), composer: { mediaId: '', postId: '', caption: '', variants: [], style: 'naturel' }, uploads: [], urlsUpdatedAt: 0 };
+  const S = { creators: [], accounts: [], media: [], posts: [], urls: {}, creatorId: '', tab: 'overview', configured: false, ai: false, scheduler: { active: false }, isAdmin: false, redirect: '', selected: new Set(), filter: 'all', month: monthStart(new Date()), composer: { mediaId: '', postId: '', caption: '', variants: [], style: 'naturel' }, uploads: [], urlsUpdatedAt: 0, buffer: { configured: false, channels: [], jobs: [], error: '', loading: false, loaded: false, channelId: '' } };
   const $ = (s) => main.querySelector(s), $$ = (s) => [...main.querySelectorAll(s)];
   const p = (s) => esc(s ?? '');
   const busy = (b, on) => { if (!b) return; b.disabled = on; b.setAttribute('aria-busy', String(on)); };
@@ -59,7 +59,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
   async function refresh() { await loadData(); draw(); }
 
   // ---------- Layout ----------
-  const TABS = [['overview', 'Vue d’ensemble'], ['accounts', 'Compte Instagram'], ['media', 'Médias'], ['compose', 'Nouvelle publication'], ['posts', 'Publications'], ['calendar', 'Calendrier']];
+  const TABS = [['overview', 'Vue d’ensemble'], ['accounts', 'Compte Instagram'], ['media', 'Médias'], ['compose', 'Nouvelle publication'], ['posts', 'Publications'], ['calendar', 'Calendrier'], ...(S.isAdmin ? [['buffer', 'Buffer']] : [])];
   function layout(content) {
     main.innerHTML = `<div class="social-page">
       <div class="main-head"><div><h1>Social Automation</h1><p>Importe tes photos, rédige les légendes avec l’IA et programme tes publications Instagram.</p></div></div>
@@ -70,13 +70,22 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         <span class="social-toolbar-status">${igBadge()}</span></section>
       <nav class="social-tabs" role="tablist" aria-label="Social Automation">${TABS.map(([id, label]) => `<button type="button" role="tab" class="btn-sm ${S.tab === id ? 'social-selected' : ''}" data-tab="${id}" aria-selected="${S.tab === id}">${label}</button>`).join('')}</nav>
       ${content}</div>`;
-    $('#social-creator').onchange = async (e) => { S.creatorId = e.target.value; S.selected.clear(); S.composer = { ...S.composer, mediaId: '', postId: '', caption: '', variants: [] }; try { await refresh(); } catch (err) { fail(err); } };
+    $('#social-creator').onchange = async (e) => { S.creatorId = e.target.value; S.selected.clear(); S.composer = { ...S.composer, mediaId: '', postId: '', caption: '', variants: [] }; S.buffer.loaded = false; try { if (S.tab === 'buffer') await loadBuffer(); await refresh(); } catch (err) { fail(err); } };
     $('#social-new-creator').onclick = async () => { const name = prompt('Nom du créateur (ex : Elyna Moreau)'); if (!name?.trim()) return; try { const r = await call('create_creator', { name: name.trim() }); S.creators.push(r.creator); S.creatorId = r.creator.id; await refresh(); toast('Créateur créé'); } catch (e) { fail(e); } };
-    $$('[data-tab]').forEach((b) => b.onclick = () => { S.tab = b.dataset.tab; draw(); });
+    $$('[data-tab]').forEach((b) => b.onclick = async () => {
+      S.tab = b.dataset.tab;
+      if (S.tab === 'buffer') {
+        S.buffer.loading = true; draw();
+        try { await loadBuffer(); } catch (e) { S.buffer.error = e.message || 'Connexion impossible'; }
+        S.buffer.loading = false;
+      }
+      draw();
+    });
     $('[data-close-banner]')?.addEventListener('click', () => { S.banner = null; draw(); });
   }
   function igBadge() {
     const a = account();
+    if (S.tab === 'buffer') return `<span class="social-pill ${S.buffer.configured ? 's-published' : 's-failed'}">Buffer ${S.buffer.configured ? 'disponible' : 'non configuré'}</span>`;
     if (!S.configured) return '<span class="social-pill s-failed">Meta non configuré</span>';
     if (!a) return '<span class="social-pill">Instagram non connecté</span>';
     if (a.state === 'connected') return `<span class="social-pill s-published">@${p(a.username)} connecté</span>`;
@@ -331,6 +340,50 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
       <div class="social-actions">${act.join('')}</div><ol class="social-events" id="ev-${p(x.id)}" hidden></ol></div></article>`;
   }
 
+
+  // ---------- Buffer (separate personal API-key bridge; NO Meta App required) ----------
+  const bufferCall = async (action, body = {}) => {
+    const { data, error } = await sb.functions.invoke('buffer-bridge', { body: { action, creator_id: S.creatorId, ...body } });
+    if (error) { let message = error.message; try { const detail = await error.context.json(); message = detail.error || message; } catch {} throw Error(message); }
+    if (data?.error) throw Error(data.error);
+    return data;
+  };
+  async function loadBuffer() {
+    S.buffer.error = '';
+    if (!S.creatorId) return;
+    const r = await bufferCall('status');
+    S.buffer.configured = !!r.configured;
+    S.buffer.channels = r.channels || [];
+    S.buffer.jobs = r.jobs || [];
+    S.buffer.error = r.error || '';
+    S.buffer.loaded = true;
+    if (!S.buffer.channels.some((c) => c.id === S.buffer.channelId)) S.buffer.channelId = S.buffer.channels[0]?.id || '';
+  }
+  function bufferView() {
+    const b = S.buffer;
+    const existing = new Set(b.jobs.map((x) => x.source_post_id));
+    const drafts = S.posts.filter((x) => x.state === 'draft' && !existing.has(x.id) && !igProblem(mediaById(x.media_id)));
+    const defaultTime = new Date(Date.now() + 2 * 60 * 60 * 1000); defaultTime.setMinutes(0, 0, 0);
+    const maxTime = new Date(Date.now() + 14 * 86400_000);
+    const statusLabel = { pending: 'En cours chez Buffer', queued: 'Programmé chez Buffer', failed: 'Refusé par Buffer', uncertain: 'Statut incertain : vérifier Buffer' };
+    return `<section class="panel"><div class="social-gallery-head"><div><h2>Buffer — programmation Instagram</h2><p class="muted small">Cette intégration est indépendante de Meta for Developers. Buffer reçoit les publications validées et gère leur diffusion.</p></div>
+      <button type="button" class="btn-sm btn-ghost" id="buffer-reload">Actualiser</button></div>
+      ${b.loading ? '<p class="muted">Connexion à Buffer…</p>' : ''}
+      ${b.error ? `<p class="social-err" role="alert">${p(b.error)}</p>` : ''}
+      ${!b.configured ? `<p class="social-err">Buffer n'est pas encore configuré sur le serveur.</p><ol><li>Connecte le compte Instagram professionnel <strong>@starelyna</strong> dans <a href="https://buffer.com/" target="_blank" rel="noopener noreferrer">Buffer</a>.</li><li>Crée une clé dans <a href="https://publish.buffer.com/settings/api" target="_blank" rel="noopener noreferrer">Paramètres Buffer → API</a>.</li><li>Ajoute <code>BUFFER_API_KEY</code> et <code>BUFFER_MEDIA_SIGNING_KEY</code> dans les secrets Supabase puis déploie <code>buffer-bridge</code>. Ne colle jamais ta clé ici.</li></ol>` :
+      `<div class="social-form"><p class="social-ok">Connexion API Buffer disponible · ${b.channels.length} compte(s) Instagram détecté(s).</p>
+        ${b.channels.length ? `<label>Compte Instagram dans Buffer<select id="buffer-channel">${b.channels.map((c) => `<option value="${p(c.id)}" ${c.id === b.channelId ? 'selected' : ''}>${p(c.name)} (${p(c.organization_name)})</option>`).join('')}</select></label>` : '<p class="social-err">Connecte un compte Instagram professionnel à Buffer pour continuer.</p>'}
+        <label>Brouillon RelaisIA<select id="buffer-draft">${drafts.length ? drafts.map((x) => `<option value="${p(x.id)}">${p(x.caption.slice(0, 92))}</option>`).join('') : '<option value="">Aucun brouillon prêt</option>'}</select></label>
+        <label>Date de publication (heure locale)<input type="datetime-local" id="buffer-when" min="${localInput(new Date(Date.now() + 10 * 60_000))}" max="${localInput(maxTime)}" value="${localInput(defaultTime)}"></label>
+        <p class="small muted">Choisis une date entre 10 minutes et 14 jours. Les photos sont transmises via des liens signés qui restent accessibles à Buffer jusqu'à la publication.</p>
+        <label class="social-inline"><input type="checkbox" id="buffer-confirm"> Je confirme que le contenu est autorisé, non explicite et prêt à être programmé sur le compte Instagram sélectionné.</label>
+        <button type="button" id="buffer-submit" class="btn-primary" ${!drafts.length || !b.channels.length ? 'disabled' : ''}>Programmer via Buffer</button>
+        <p class="small muted">L'envoi à Buffer programme réellement un post. Aucune publication n'est envoyée avant de cliquer et confirmer. Le planificateur Meta de RelaisIA n'est pas utilisé.</p></div>`}
+      <div class="social-gallery-head"><h3>Historique des envois à Buffer</h3></div>
+      ${b.jobs.length ? b.jobs.map((j) => `<div class="social-compact"><div><strong>${p(statusLabel[j.status] || j.status)} · ${when(j.due_at)}</strong><p class="small muted">${p(j.caption.slice(0, 120))}</p>${j.last_error ? `<p class="small social-err">${p(j.last_error)}</p>` : ''}${j.buffer_post_id ? `<p class="small muted">ID Buffer : ${p(j.buffer_post_id)} · statut Instagram à vérifier dans Buffer</p>` : ''}</div></div>`).join('') : '<p class="muted">Aucun envoi Buffer pour ce créateur.</p>'}
+      <p class="small muted">Le statut « Programmé chez Buffer » n'est pas une confirmation de publication sur Instagram. Vérifie l'état final dans Buffer.</p></section>`;
+  }
+
   // ---------- Calendar ----------
   function monthStart(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
   function calendarView() {
@@ -354,7 +407,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
 
   // ---------- Render + bindings ----------
   function draw() {
-    const views = { overview, accounts: accountsView, media: mediaView, compose: composeView, posts: postsView, calendar: calendarView };
+    const views = { overview, accounts: accountsView, media: mediaView, compose: composeView, posts: postsView, calendar: calendarView, buffer: bufferView };
     layout(!S.creators.length ? '<section class="panel"><h2>Bienvenue</h2><p>Crée un espace créateur pour commencer.</p></section>' : (views[S.tab] || overview)());
     const on = (sel, fn) => $$(sel).forEach((b) => b.onclick = (e) => fn(b, e));
     const act = (fn, msg) => async (b) => { busy(b, true); try { await fn(b); if (msg) toast(msg); await refresh(); } catch (e) { if (e?.message !== 'Annulé') fail(e); } finally { busy(b, false); } };
@@ -417,6 +470,27 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         if (!box.hidden) { box.hidden = true; b.setAttribute('aria-expanded', 'false'); return; }
         try { const r = await call('post_events', { creator_id: S.creatorId, post_id: b.dataset.events }); box.innerHTML = (r.events || []).map((e) => `<li><span class="muted">${when(e.created_at)}</span> ${p(EVENTS[e.event] || e.event)}${e.detail && !/^(\d+|C\w+)$/.test(e.detail) ? ` — <span class="muted">${p(/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(e.detail) ? 'pour le ' + when(e.detail) : e.detail)}</span>` : ''}</li>`).join('') || '<li class="muted">Aucun événement</li>'; box.hidden = false; b.setAttribute('aria-expanded', 'true'); } catch (e) { fail(e); }
       });
+    }
+    if (S.tab === 'buffer') {
+      on('#buffer-reload', async (b) => { busy(b, true); try { await loadBuffer(); await loadData(); draw(); } catch (e) { S.buffer.error = e.message || 'Erreur'; draw(); } finally { busy(b, false); } });
+      const c = $('#buffer-channel'); if (c) c.onchange = () => { S.buffer.channelId = c.value; };
+      const submit = $('#buffer-submit'); if (submit) submit.onclick = async () => {
+        const id = $('#buffer-draft')?.value, dateValue = $('#buffer-when')?.value;
+        const ok = $('#buffer-confirm')?.checked;
+        if (!id || !dateValue || !S.buffer.channelId) { toast('Sélectionne un brouillon, un compte et une date', true); return; }
+        if (!ok) { toast('Confirme la publication avant de continuer', true); return; }
+        const date = new Date(dateValue);
+        if (!(date.getTime() > Date.now() + 10 * 60_000) || date.getTime() > Date.now() + 14 * 86400_000) { toast('Date entre 10 minutes et 14 jours requise', true); return; }
+        const chan = S.buffer.channels.find((x) => x.id === S.buffer.channelId);
+        if (!confirm(`Programmer réellement ce brouillon via Buffer sur ${chan?.name || 'Instagram'} pour le ${fmtDate(date.toISOString())} ?`)) return;
+        busy(submit, true);
+        try {
+          const result = await bufferCall('schedule', { post_id: id, channel_id: S.buffer.channelId, due_at: date.toISOString(), confirm: true });
+          toast(result.warning || 'Publication enregistrée chez Buffer');
+          await loadBuffer(); await loadData(); draw();
+        } catch (e) { fail(e); try { await loadBuffer(); await loadData(); draw(); } catch {} }
+        finally { busy(submit, false); }
+      };
     }
     if (S.tab === 'calendar') on('[data-month]', (b) => { const n = Number(b.dataset.month); S.month = n === 0 ? monthStart(new Date()) : new Date(S.month.getFullYear(), S.month.getMonth() + n, 1); draw(); });
   }
