@@ -21,7 +21,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
     if (data?.error) { const e = Error(data.error); e.data = data; throw e; }
     return data;
   };
-  const S = { creators: [], accounts: [], media: [], posts: [], urls: {}, creatorId: '', tab: 'overview', configured: false, ai: false, scheduler: { active: false }, isAdmin: false, redirect: '', selected: new Set(), filter: 'all', month: monthStart(new Date()), composer: { mediaId: '', mediaIds: [], postId: '', caption: '', variants: [], style: 'naturel', showLibrary: true }, uploads: [], urlsUpdatedAt: 0, buffer: { configured: false, channels: [], jobs: [], error: '', loading: false, loaded: false, channelId: '', draftId: '', mediaIds: [], dateValue: '', confirmed: false } };
+  const S = { creators: [], accounts: [], media: [], posts: [], urls: {}, creatorId: '', tab: 'overview', configured: false, ai: false, vision: false, scheduler: { active: false }, isAdmin: false, redirect: '', selected: new Set(), filter: 'all', month: monthStart(new Date()), composer: { mediaId: '', mediaIds: [], postId: '', caption: '', variants: [], style: 'naturel', showLibrary: true, visualStatus: '', visualError: '', visualKey: '', autoCaption: '', manualCaption: false }, uploads: [], urlsUpdatedAt: 0, buffer: { configured: false, channels: [], jobs: [], error: '', loading: false, loaded: false, channelId: '', draftId: '', mediaIds: [], dateValue: '', confirmed: false } };
   const $ = (s) => main.querySelector(s), $$ = (s) => [...main.querySelectorAll(s)];
   const p = (s) => esc(s ?? '');
   const busy = (b, on) => { if (!b) return; b.disabled = on; b.setAttribute('aria-busy', String(on)); };
@@ -39,7 +39,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
 
   async function loadStatus() {
     const r = await call('status');
-    Object.assign(S, { creators: r.creators || [], accounts: r.accounts || [], configured: !!r.instagram_configured, ai: !!r.ai_configured, scheduler: r.scheduler || { active: false }, isAdmin: !!r.is_admin, redirect: r.redirect_uri || '' });
+    Object.assign(S, { creators: r.creators || [], accounts: r.accounts || [], configured: !!r.instagram_configured, ai: !!r.ai_configured, vision: !!r.vision_configured, scheduler: r.scheduler || { active: false }, isAdmin: !!r.is_admin, redirect: r.redirect_uri || '' });
     if (!S.creators.some((c) => c.id === S.creatorId)) S.creatorId = S.creators[0]?.id || '';
   }
   async function loadData() {
@@ -243,7 +243,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
 
   // ---------- Composer ----------
   const composerIds = () => S.composer.mediaIds?.length ? [...S.composer.mediaIds] : (S.composer.mediaId ? [S.composer.mediaId] : []);
-  const newComposer = () => ({ mediaId: '', mediaIds: [], postId: '', caption: '', variants: [], style: 'naturel', description: '', question: true, showLibrary: true });
+  const newComposer = () => ({ mediaId: '', mediaIds: [], postId: '', caption: '', variants: [], style: 'naturel', description: '', question: true, showLibrary: true, visualStatus: '', visualError: '', visualKey: '', autoCaption: '', manualCaption: false });
   // ---------- Composer: one post may contain up to 20 ordered images ----------
   function composeView() {
     const c = S.composer, ids = composerIds(), m = ids.length ? mediaById(ids[0]) : null;
@@ -284,12 +284,16 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         }).join('')}</div>` : ''}
         </div>
         ${prob ? `<p class="small social-err">Photo incompatible : ${p(prob)}. Retire-la ou réimporte-la avec l’option de compatibilité Instagram.</p>` : ''}
-        <h2 class="social-h2">2. Génère des légendes avec l’IA</h2>
+        <h2 class="social-h2">2. Légende créée par l’IA</h2>
         <div class="social-form">
-          <label>Décris les photos (ce que l’IA ne voit pas) <input id="social-description" maxlength="500" value="${p(c.description || '')}" placeholder="Ex : trois portraits, tenue noire, poses différentes dans un salon"></label>
+          ${S.vision ? `<p class="small muted">L’IA analyse les photos sélectionnées et prépare automatiquement une légende et des hashtags. Les images choisies sont transmises à Google Gemini pour cette analyse, mais rien n’est publié sans validation.</p>` : `<p class="small muted">Pour analyser réellement les images, ajoute une clé GEMINI_API_KEY aux secrets Supabase. En attendant, NoTrack peut rédiger à partir de ta description.</p>`}
+          <label>Précisions facultatives pour l’IA <input id="social-description" maxlength="500" value="${p(c.description || '')}" placeholder="Facultatif : ambiance, idée à transmettre, contexte…"></label>
+          ${c.visualStatus === 'loading' ? '<p class="small muted" role="status">Analyse des photos et création des légendes en cours…</p>' : ''}
+          ${c.visualStatus === 'done' ? '<p class="small social-ok" role="status">Légende générée automatiquement. Tu peux la modifier avant validation.</p>' : ''}
+          ${c.visualStatus === 'error' ? `<p class="small social-err" role="alert">Analyse automatique indisponible : ${p(c.visualError)}. Tu peux saisir une légende manuellement.</p>` : ''}
           <label>Style <select id="social-style">${STYLES.map(([k, l]) => `<option value="${k}" ${k === c.style ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
           <label class="social-inline"><input id="social-question" type="checkbox" ${c.question === false ? '' : 'checked'}> Ajouter une question pour susciter des commentaires</label>
-          <div class="social-actions"><button type="button" id="social-generate" class="btn-sm" ${!S.ai ? 'disabled' : ''}>${c.variants.length ? 'Régénérer' : 'Générer 3 légendes'}</button>${!S.ai ? '<span class="small muted">NoTrack non configuré</span>' : ''}</div>
+          <div class="social-actions"><button type="button" id="social-generate" class="btn-sm" ${!S.ai && !S.vision ? 'disabled' : ''}>${S.vision ? 'Régénérer depuis les photos' : (c.variants.length ? 'Régénérer' : 'Générer 3 légendes')}</button>${!S.ai && !S.vision ? '<span class="small muted">Aucune IA configurée</span>' : ''}</div>
           <div id="social-variants">${c.variants.map((v, i) => `<div class="social-variant"><p>${p(assemble(v))}</p><div class="social-actions"><button type="button" class="btn-sm" data-use="${i}">Utiliser</button><button type="button" class="btn-sm btn-ghost" data-copy="${i}">Copier</button></div></div>`).join('')}</div>
         </div></section>
       <section class="panel"><h2>3. Valide la légende</h2>
@@ -314,6 +318,48 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
       : await call('create_post', { creator_id: S.creatorId, media_id: ids[0], media_ids: ids, caption: c.caption, caption_style: c.style });
     c.postId = r.post.id; c.mediaId = r.post.media_id; c.mediaIds = r.post.media_ids?.length ? [...r.post.media_ids] : [...ids]; c.caption = r.post.caption;
     return r.post;
+  }
+
+  // Analyse visuelle : déclenchée à la sélection, jamais à la publication.
+  let visionTimer = null, visionSeq = 0;
+  function autoGenerateFromPhotos(force = false) {
+    const c = S.composer, ids = composerIds();
+    if (!S.vision || !ids.length || !S.creatorId) return;
+    if (!force && (c.manualCaption || (c.visualStatus === 'done' && c.visualKey === ids.join('|')))) return;
+    if (visionTimer) clearTimeout(visionTimer);
+    const seq = ++visionSeq, key = ids.join('|'), creatorId = S.creatorId;
+    c.visualKey = key; c.visualStatus = 'loading'; c.visualError = '';
+    draw();
+    visionTimer = setTimeout(async () => {
+      try {
+        const r = await call('generate_visual_captions', {
+          creator_id: creatorId, media_ids: ids, style: c.style,
+          description: c.description || '', include_question: c.question !== false,
+        });
+        if (seq !== visionSeq || S.composer !== c || S.creatorId !== creatorId || composerIds().join('|') !== key) return;
+        if (!Array.isArray(r.variants) || !r.variants.length || !r.variants.every((v) => v && typeof v.text === 'string' && Array.isArray(v.hashtags))) throw Error('Réponse IA incomplète');
+        c.variants = r.variants;
+        if (!c.manualCaption) {
+          c.caption = assemble(r.variants[0]);
+          c.autoCaption = c.caption;
+        }
+        c.visualStatus = 'done'; c.visualError = '';
+        draw();
+      } catch (e) {
+        if (seq !== visionSeq || S.composer !== c || S.creatorId !== creatorId || composerIds().join('|') !== key) return;
+        c.visualStatus = 'error'; c.visualError = e?.message || 'Service inaccessible';
+        draw();
+      }
+    }, force ? 0 : 700);
+  }
+  function composerPhotosChanged() {
+    const c = S.composer;
+    if (visionTimer) clearTimeout(visionTimer);
+    ++visionSeq;
+    if (c.autoCaption && c.caption === c.autoCaption && !c.manualCaption) c.caption = '';
+    c.variants = []; c.visualStatus = ''; c.visualKey = ''; c.visualError = ''; c.autoCaption = '';
+    draw();
+    autoGenerateFromPhotos();
   }
 
   // ---------- Schedule dialog ----------
@@ -484,19 +530,20 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
       on('[data-preview]', (b) => preview(b.dataset.preview));
       $$('[data-select]').forEach((c) => c.onchange = () => { c.checked ? S.selected.add(c.dataset.select) : S.selected.delete(c.dataset.select); draw(); });
       on('#social-clear-selection', () => { S.selected.clear(); draw(); });
-      on('#social-compose-selected', () => { const ids = [...S.selected].filter((id) => !igProblem(mediaById(id))).slice(0, 20); if (!ids.length) { toast('Sélectionne des images compatibles Instagram', true); return; } S.composer = { ...newComposer(), mediaId: ids[0], mediaIds: ids, showLibrary: false }; S.tab = 'compose'; draw(); if (S.selected.size > 20) toast('20 photos maximum : les autres ne sont pas incluses', true); });
+      on('#social-compose-selected', () => { const ids = [...S.selected].filter((id) => !igProblem(mediaById(id))).slice(0, 20); if (!ids.length) { toast('Sélectionne des images compatibles Instagram', true); return; } S.composer = { ...newComposer(), mediaId: ids[0], mediaIds: ids, showLibrary: false }; S.tab = 'compose'; draw(); autoGenerateFromPhotos(); if (S.selected.size > 20) toast('20 photos maximum : les autres ne sont pas incluses', true); });
       on('#social-archive-selected', act(async () => { if (!confirm(`Archiver ${S.selected.size} photo(s) ? Elles restent stockées en privé.`)) throw Error('Annulé'); const r = await call('archive_media', { creator_id: S.creatorId, media_ids: [...S.selected] }); S.selected.clear(); toast(`${r.archived} archivée(s)${r.blocked ? `, ${r.blocked} bloquée(s) car programmée(s)` : ''}`); }));
     }
     if (S.tab === 'compose') {
-      on('[data-compose-add]', (b) => { readComposer(); const ids = composerIds(), id = b.dataset.composeAdd, index = ids.indexOf(id); if (index >= 0) ids.splice(index, 1); else if (ids.length < 20) ids.push(id); else { toast('20 photos maximum', true); return; } S.composer.mediaIds = ids; S.composer.mediaId = ids[0] || ''; draw(); });
-      on('[data-compose-remove]', (b) => { readComposer(); const ids = composerIds().filter((id) => id !== b.dataset.composeRemove); S.composer.mediaIds = ids; S.composer.mediaId = ids[0] || ''; draw(); });
-      const movePhoto = (id, direction) => { readComposer(); const ids = composerIds(), from = ids.indexOf(id), to = from + direction; if (from < 0 || to < 0 || to >= ids.length) return; [ids[from], ids[to]] = [ids[to], ids[from]]; S.composer.mediaIds = ids; S.composer.mediaId = ids[0]; draw(); };
+      on('[data-compose-add]', (b) => { readComposer(); const ids = composerIds(), id = b.dataset.composeAdd, index = ids.indexOf(id); if (index >= 0) ids.splice(index, 1); else if (ids.length < 20) ids.push(id); else { toast('20 photos maximum', true); return; } S.composer.mediaIds = ids; S.composer.mediaId = ids[0] || ''; composerPhotosChanged(); });
+      on('[data-compose-remove]', (b) => { readComposer(); const ids = composerIds().filter((id) => id !== b.dataset.composeRemove); S.composer.mediaIds = ids; S.composer.mediaId = ids[0] || ''; composerPhotosChanged(); });
+      const movePhoto = (id, direction) => { readComposer(); const ids = composerIds(), from = ids.indexOf(id), to = from + direction; if (from < 0 || to < 0 || to >= ids.length) return; [ids[from], ids[to]] = [ids[to], ids[from]]; S.composer.mediaIds = ids; S.composer.mediaId = ids[0]; composerPhotosChanged(); };
       on('[data-compose-up]', (b) => movePhoto(b.dataset.composeUp, -1));
       on('[data-compose-down]', (b) => movePhoto(b.dataset.composeDown, 1));
       on('#social-toggle-gallery', () => { readComposer(); S.composer.showLibrary = !S.composer.showLibrary; draw(); });
-      const cap = $('#social-caption'); if (cap) cap.oninput = () => { S.composer.caption = cap.value; $('#social-count').textContent = cap.value.length; $('#social-preview-text').textContent = cap.value || 'Ta légende apparaîtra ici.'; };
+      const cap = $('#social-caption'); if (cap) cap.oninput = () => { S.composer.manualCaption = true; S.composer.caption = cap.value; $('#social-count').textContent = cap.value.length; $('#social-preview-text').textContent = cap.value || 'Ta légende apparaîtra ici.'; };
       on('#social-generate', async (b) => {
         readComposer(); const c = S.composer;
+        if (S.vision) { c.manualCaption = false; autoGenerateFromPhotos(true); return; }
         if ((c.description || '').trim().length < 3) { toast('Décris la photo en quelques mots', true); return; }
         busy(b, true); b.textContent = 'Génération…';
         try {
@@ -506,7 +553,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         }
         catch (e) { fail(e); busy(b, false); b.textContent = c.variants.length ? 'Régénérer' : 'Générer 3 légendes'; }
       });
-      on('[data-use]', (b) => { readComposer(); S.composer.caption = assemble(S.composer.variants[Number(b.dataset.use)]); draw(); $('#social-caption')?.focus(); });
+      on('[data-use]', (b) => { readComposer(); S.composer.manualCaption = true; S.composer.caption = assemble(S.composer.variants[Number(b.dataset.use)]); draw(); $('#social-caption')?.focus(); });
       on('[data-copy]', async (b) => { try { await navigator.clipboard.writeText(assemble(S.composer.variants[Number(b.dataset.copy)])); toast('Copié'); } catch { toast('Copie impossible', true); } });
       on('#social-save', async (b) => { busy(b, true); try { await saveComposer(); toast('Brouillon enregistré avec ' + composerIds().length + ' photo(s)'); S.composer = newComposer(); S.selected.clear(); S.tab = 'posts'; S.filter = 'draft'; await refresh(); } catch (e) { fail(e); } finally { busy(b, false); } });
       on('#social-save-schedule', async (b) => { busy(b, true); try { const post = await saveComposer(); await loadData(); if (S.isAdmin) { S.buffer.draftId = post.id; S.buffer.mediaIds = post.media_ids?.length ? [...post.media_ids] : [post.media_id]; S.buffer.confirmed = false; S.tab = 'buffer'; await loadBuffer(); S.selected.clear(); S.composer = newComposer(); draw(); toast('Brouillon prêt pour Buffer : vérifie les photos et l’heure avant de programmer.'); } else { if ((post.media_ids || []).length > 1) throw Error('Pour un carrousel, utilise Buffer'); draw(); scheduleDialog(post); } } catch (e) { fail(e); } finally { busy(b, false); } });

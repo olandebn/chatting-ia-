@@ -44,6 +44,13 @@ async function validateDraftMedia(userId: string, creatorId: string, coverId: st
   return { ids: requested as string[], synthetic: images.some((m) => m.is_synthetic) };
 }
 
+// Convert a limited image blob to inline base64 for multimodal analysis; never return it to the browser.
+function base64Bytes(bytes: Uint8Array) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
 const ACCOUNT_FIELDS = 'id,creator_id,platform,username,account_type,profile_picture_url,state,permissions,token_expires_at,token_refreshed_at,connected_at,last_error';
 
 async function creatorFor(uid: string, id: string) { const { data, error } = await admin.from('social_creators').select('*').eq('user_id', uid).eq('id', id).maybeSingle(); if (error) throw error; return data; }
@@ -138,7 +145,7 @@ async function postHandler(req: Request) {
       ]);
       if (creators.error || accounts.error) throw creators.error || accounts.error;
       return result({
-        creators: creators.data, accounts: accounts.data, instagram_configured: metaConfigured(), ai_configured: !!env('NOTRACK_API_KEY'),
+        creators: creators.data, accounts: accounts.data, instagram_configured: metaConfigured(), ai_configured: !!env('NOTRACK_API_KEY'), vision_configured: !!env('GEMINI_API_KEY'),
         scheduler: sched.data ?? { exists: false, active: false }, is_admin: !!profile.data?.is_admin, redirect_uri: REDIRECT, graph_version: GRAPH_VERSION,
       });
     }
@@ -332,6 +339,65 @@ async function postHandler(req: Request) {
       const { data: pending } = await admin.from('social_posts').update({ state: 'draft', scheduled_at: null, approved_at: null, updated_at: nowIso() }).eq('user_id', uid).eq('account_id', row.id).eq('state', 'scheduled').select('id');
       const { error } = await admin.from('social_accounts').update({ state: 'disconnected', encrypted_token: null, token_expires_at: null, permissions: [], last_error: null, updated_at: nowIso() }).eq('id', row.id).eq('user_id', uid); if (error) throw error;
       return result({ ok: true, unscheduled: pending?.length ?? 0 });
+    }
+    // Vision API is strictly opt-in: the secret never leaves the Edge Function.
+    if (action === 'generate_visual_captions') {
+      const geminiKey = env('GEMINI_API_KEY');
+      if (!geminiKey) return bad('Analyse visuelle non configurée : ajoute GEMINI_API_KEY dans les secrets Supabase', 503);
+      const ids: unknown = b.media_ids;
+      if (!Array.isArray(ids) || ids.length < 1 || ids.length > 20 || ids.some((id) => !isId(id)) || new Set(ids).size !== ids.length) return bad('Choisis 1 à 20 photos différentes');
+      const styleKey = String(b.style || 'naturel');
+      if (!Object.hasOwn(CAPTION_STYLES, styleKey)) return bad('Style de légende invalide');
+      if (!(await rateOk(uid, 'vision_captions', 20, 3600))) return bad('Limite de 20 analyses visuelles par heure atteinte', 429);
+      const { data: allMedia, error: mediaError } = await admin.from('social_media')
+        .select('id,storage_path,mime_type,bytes,state')
+        .eq('user_id', uid).eq('creator_id', creator).in('id', ids);
+      if (mediaError || !allMedia || allMedia.length !== ids.length || allMedia.some((m) => m.state !== 'ready')) return bad('Photos introuvables ou indisponibles');
+      const mediaMap = new Map<string, any>(allMedia.map((m: any) => [m.id, m]));
+      // Analyze a representative subset for lengthy carousels, without giving the provider public URLs.
+      const imageIndexes = Array.from(new Set([0, Math.round((ids.length - 1) / 3), Math.round((ids.length - 1) * 2 / 3), ids.length - 1]));
+      const analyzed = imageIndexes.map((i) => mediaMap.get(ids[i]));
+      if (analyzed.some((m) => !m || !['image/jpeg', 'image/png', 'image/webp'].includes(m.mime_type) || m.bytes > 2 * 1024 * 1024))
+        return bad('Analyse visuelle : une photo dépasse 2 Mo. Réimporte-la en version optimisée ou saisis une légende manuellement.');
+      const parts: any[] = [{ text: [
+        'Tu rédiges des légendes Instagram en français pour une créatrice virtuelle : ' + safeText((await creatorFor(uid, creator))?.name || 'Créatrice virtuelle', 100) + '.',
+        'Tu peux observer les ' + analyzed.length + ' photos jointes du carrousel de ' + ids.length + ' photos (dans cet ordre). Ne décris pas les photos non jointes.',
+        'Décris seulement les éléments réellement visibles. N’invente ni ville, ni lieu, ni marque, ni date, ni sentiments personnels non observables.',
+        'Ton souhaité : ' + CAPTION_STYLES[styleKey] + '. Une formulation naturelle, personnelle et non robotique, sans répétitions.',
+        'Contexte facultatif fourni par la personne : ' + (safeText(b.description, 500) || 'aucun') + '.',
+        'Génère trois propositions différentes pour UN SEUL post : concise, élégante, conversationnelle. Chacune a text, question, hashtags.',
+        b.include_question === false ? 'Ne pose aucune question, question doit être vide.' : 'Pose une question brève qui incite les gens à choisir une photo (ex : 1, 2 ou 3 ?), si naturel.',
+        '3 à 5 hashtags maximum par variante, pertinents, avec obligatoirement #CréatriceVirtuelle. Évite #NoTrack et les hashtags hors sujet.',
+        'Pas de contenu explicite ni de promesses trompeuses. Ne présente pas la créatrice virtuelle comme une personne réelle. Maximum deux emojis par variante.',
+        'Retourne uniquement ce JSON : {"variants":[{"text":"...","question":"...","hashtags":["#...","#..."]}, ...]}.',
+      ].join('\n') }];
+      for (const item of analyzed) {
+        const { data: blob, error: blobError } = await admin.storage.from(BUCKET).download(item.storage_path);
+        if (blobError || !blob) return bad('Impossible de lire une photo pour l’analyse visuelle', 502);
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (bytes.byteLength > 2 * 1024 * 1024) return bad('Image trop volumineuse pour l’analyse visuelle', 413);
+        parts.push({ inline_data: { mime_type: item.mime_type, data: base64Bytes(bytes) } });
+      }
+      const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+        method: 'POST',
+        headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts }],
+          generationConfig: { temperature: 0.85, responseMimeType: 'application/json', maxOutputTokens: 1800 },
+        }),
+        signal: AbortSignal.timeout(45000),
+      });
+      if (!response.ok) {
+        if (response.status === 400 || response.status === 401 || response.status === 403) return bad('Clé Gemini invalide ou accès au modèle refusé : vérifie GEMINI_API_KEY', 503);
+        if (response.status === 429) return bad('Limite Gemini atteinte, réessaie plus tard', 429);
+        return bad('Analyse visuelle temporairement indisponible (' + response.status + ')', 503);
+      }
+      const body = await response.json().catch(() => null);
+      const raw = (body?.candidates?.[0]?.content?.parts || []).map((p: any) => p?.text || '').join('').trim();
+      let variants;
+      try { variants = parseCaptionVariants(raw); } catch { return bad('Gemini a renvoyé une légende dans un format invalide, régénère', 502); }
+      if (!variants.length) return bad('Gemini n’a pas généré de légende exploitable, régénère', 502);
+      return result({ variants, style: styleKey, images_analyzed: analyzed.length, image_count: ids.length });
     }
     if (action === 'generate_captions') {
       const description = safeText(b.description, 500), styleKey = String(b.style || '');
