@@ -21,7 +21,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
     if (data?.error) { const e = Error(data.error); e.data = data; throw e; }
     return data;
   };
-  const S = { creators: [], accounts: [], media: [], posts: [], urls: {}, creatorId: '', tab: 'overview', configured: false, ai: false, scheduler: { active: false }, isAdmin: false, redirect: '', selected: new Set(), filter: 'all', month: monthStart(new Date()), composer: { mediaId: '', postId: '', caption: '', variants: [], style: 'naturel' }, uploads: [], urlsUpdatedAt: 0, buffer: { configured: false, channels: [], jobs: [], error: '', loading: false, loaded: false, channelId: '', draftId: '', mediaIds: [], dateValue: '', confirmed: false } };
+  const S = { creators: [], accounts: [], media: [], posts: [], urls: {}, creatorId: '', tab: 'overview', configured: false, ai: false, scheduler: { active: false }, isAdmin: false, redirect: '', selected: new Set(), filter: 'all', month: monthStart(new Date()), composer: { mediaId: '', mediaIds: [], postId: '', caption: '', variants: [], style: 'naturel', showLibrary: true }, uploads: [], urlsUpdatedAt: 0, buffer: { configured: false, channels: [], jobs: [], error: '', loading: false, loaded: false, channelId: '', draftId: '', mediaIds: [], dateValue: '', confirmed: false } };
   const $ = (s) => main.querySelector(s), $$ = (s) => [...main.querySelectorAll(s)];
   const p = (s) => esc(s ?? '');
   const busy = (b, on) => { if (!b) return; b.disabled = on; b.setAttribute('aria-busy', String(on)); };
@@ -70,7 +70,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         <span class="social-toolbar-status">${igBadge()}</span></section>
       <nav class="social-tabs" role="tablist" aria-label="Social Automation">${TABS().map(([id, label]) => `<button type="button" role="tab" class="btn-sm ${S.tab === id ? 'social-selected' : ''}" data-tab="${id}" aria-selected="${S.tab === id}">${label}</button>`).join('')}</nav>
       ${content}</div>`;
-    $('#social-creator').onchange = async (e) => { S.creatorId = e.target.value; S.selected.clear(); S.composer = { ...S.composer, mediaId: '', postId: '', caption: '', variants: [] }; S.buffer.loaded = false; S.buffer.draftId = ''; S.buffer.mediaIds = []; S.buffer.confirmed = false; try { if (S.tab === 'buffer') await loadBuffer(); await refresh(); } catch (err) { fail(err); } };
+    $('#social-creator').onchange = async (e) => { S.creatorId = e.target.value; S.selected.clear(); S.composer = { ...S.composer, mediaId: '', mediaIds: [], postId: '', caption: '', variants: [], showLibrary: true }; S.buffer.loaded = false; S.buffer.draftId = ''; S.buffer.mediaIds = []; S.buffer.confirmed = false; try { if (S.tab === 'buffer') await loadBuffer(); await refresh(); } catch (err) { fail(err); } };
     $('#social-new-creator').onclick = async () => { const name = prompt('Nom du créateur (ex : Elyna Moreau)'); if (!name?.trim()) return; try { const r = await call('create_creator', { name: name.trim() }); S.creators.push(r.creator); S.creatorId = r.creator.id; await refresh(); toast('Créateur créé'); } catch (e) { fail(e); } };
     $$('[data-tab]').forEach((b) => b.onclick = async () => {
       S.tab = b.dataset.tab;
@@ -242,16 +242,51 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
   }
 
   // ---------- Composer ----------
+  const composerIds = () => S.composer.mediaIds?.length ? [...S.composer.mediaIds] : (S.composer.mediaId ? [S.composer.mediaId] : []);
+  const newComposer = () => ({ mediaId: '', mediaIds: [], postId: '', caption: '', variants: [], style: 'naturel', description: '', question: true, showLibrary: true });
+  // ---------- Composer: one post may contain up to 20 ordered images ----------
   function composeView() {
-    const c = S.composer, eligible = S.media.filter((m) => m.state === 'ready'), m = mediaById(c.mediaId), prob = m ? igProblem(m) : null, a = account();
-    const editing = c.postId ? S.posts.find((x) => x.id === c.postId) : null;
+    const c = S.composer, ids = composerIds(), m = ids.length ? mediaById(ids[0]) : null;
+    const eligible = S.media.filter((x) => x.state === 'ready' && !igProblem(x));
+    const prob = ids.map((id) => igProblem(mediaById(id))).find(Boolean) || null;
+    const a = account(), editing = c.postId ? S.posts.find((x) => x.id === c.postId) : null;
+    const showLibrary = c.showLibrary || ids.length === 0;
     return `<div class="social-compose">
-      <section class="panel"><h2>${editing ? 'Modifier le brouillon' : '1. Choisis une photo de couverture'}</h2><p class="small muted">Pour un carrousel, enregistre d’abord ce brouillon, puis ajoute les autres photos dans l’onglet Buffer.</p>
-        ${editing ? '' : eligible.length ? `<div class="social-picker">${eligible.map((x) => `<button type="button" class="social-pick ${x.id === c.mediaId ? 'is-selected' : ''}" data-pick-media="${p(x.id)}" aria-pressed="${x.id === c.mediaId}" title="${p(x.filename)}${igProblem(x) ? ' — ' + p(igProblem(x)) : ''}">${thumb(x.id)}${igProblem(x) ? '<span class="social-pick-warn">!</span>' : ''}</button>`).join('')}</div>` : '<p class="muted">Importe d’abord des photos dans l’onglet Médias.</p>'}
-        ${prob ? `<p class="small social-err">Cette photo ne pourra pas être programmée : ${p(prob)}. Réimporte-la avec l’option de compatibilité Instagram.</p>` : ''}
+      <section class="panel"><h2>${editing ? 'Modifier le brouillon' : '1. Choisis les photos de la publication'}</h2>
+        <p class="small muted">Sélectionne jusqu’à 20 photos pour un seul carrousel Instagram. L’ordre affiché ici sera celui envoyé à Buffer.</p>
+        <style>
+          .social-carousel-editor{border:1px solid var(--line,#d5dce8);border-radius:14px;padding:13px;margin:12px 0 22px}
+          .social-carousel-picker{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}
+          .social-compose-photo{width:107px;display:flex;flex-direction:column;gap:5px}
+          .social-compose-image{position:relative;width:107px;height:122px;border-radius:10px;overflow:hidden}
+          .social-compose-image .social-thumb{width:100%;height:100%;object-fit:cover}
+          .social-compose-number{position:absolute;top:5px;left:6px;border-radius:99px;padding:3px 7px;background:#1c2547;color:white;font-size:12px;font-weight:700}
+          .social-compose-movers{display:flex;gap:5px}
+          .social-compose-movers button{flex:1;cursor:pointer;min-width:28px;min-height:30px;background:transparent;border:1px solid #bfcadd;border-radius:6px;font-size:16px;color:inherit}
+          .social-compose-movers button:disabled{opacity:.25;cursor:default}
+          .social-compose-library{display:flex;gap:10px;flex-wrap:wrap;margin:13px 0}
+          .social-compose-library .social-pick{position:relative;width:94px;height:116px}
+        </style><div class="social-carousel-editor"><div class="social-gallery-head"><strong>${ids.length} photo(s) sélectionnée(s)</strong>${ids.length ? '<small class="muted">La photo 1 est la couverture</small>' : ''}</div>
+        ${ids.length ? `<div class="social-carousel-picker">${ids.map((id, index) => {
+          const photo = mediaById(id); return `<div class="social-compose-photo">
+            <div class="social-compose-image">${thumb(id)}<span class="social-compose-number">${index+1}</span></div>
+            <span class="small muted" title="${p(photo?.filename || '')}">${p((photo?.filename || 'Photo').slice(0, 17))}</span>
+            <div class="social-compose-movers">
+              <button type="button" data-compose-up="${p(id)}" aria-label="Déplacer la photo ${index+1} vers la gauche" ${index === 0 ? 'disabled' : ''}>←</button>
+              <button type="button" data-compose-down="${p(id)}" aria-label="Déplacer la photo ${index+1} vers la droite" ${index === ids.length-1 ? 'disabled' : ''}>→</button>
+              <button type="button" data-compose-remove="${p(id)}" aria-label="Retirer la photo ${index+1}">×</button>
+            </div></div>`;
+        }).join('')}</div>` : '<p class="muted">Aucune photo sélectionnée. Choisis celles de ton carrousel ci-dessous.</p>'}
+        ${ids.length ? `<button type="button" id="social-toggle-gallery" class="btn-sm btn-ghost">${showLibrary ? 'Masquer la bibliothèque' : '+ Ajouter ou retirer des photos'}</button>` : ''}
+        ${showLibrary ? `<div class="social-compose-library">${eligible.map((x) => {
+          const n = ids.indexOf(x.id);
+          return `<button type="button" class="social-pick ${n >= 0 ? 'is-selected' : ''}" data-compose-add="${p(x.id)}" aria-pressed="${n >= 0}" title="${p(x.filename)}">${thumb(x.id)}${n >= 0 ? `<span class="social-compose-number">${n+1}</span>` : ''}</button>`;
+        }).join('')}</div>` : ''}
+        </div>
+        ${prob ? `<p class="small social-err">Photo incompatible : ${p(prob)}. Retire-la ou réimporte-la avec l’option de compatibilité Instagram.</p>` : ''}
         <h2 class="social-h2">2. Génère des légendes avec l’IA</h2>
         <div class="social-form">
-          <label>Décris la photo (ce que l’IA ne voit pas) <input id="social-description" maxlength="500" value="${p(c.description || '')}" placeholder="Ex : portrait en robe bordeaux, lumière de fin de journée, terrasse"></label>
+          <label>Décris les photos (ce que l’IA ne voit pas) <input id="social-description" maxlength="500" value="${p(c.description || '')}" placeholder="Ex : trois portraits, tenue noire, poses différentes dans un salon"></label>
           <label>Style <select id="social-style">${STYLES.map(([k, l]) => `<option value="${k}" ${k === c.style ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
           <label class="social-inline"><input id="social-question" type="checkbox" ${c.question === false ? '' : 'checked'}> Ajouter une question pour susciter des commentaires</label>
           <div class="social-actions"><button type="button" id="social-generate" class="btn-sm" ${!S.ai ? 'disabled' : ''}>${c.variants.length ? 'Régénérer' : 'Générer 3 légendes'}</button>${!S.ai ? '<span class="small muted">NoTrack non configuré</span>' : ''}</div>
@@ -259,21 +294,25 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         </div></section>
       <section class="panel"><h2>3. Valide la légende</h2>
         <div class="social-form"><label>Légende finale (modifiable) <textarea id="social-caption" maxlength="2200" rows="8" placeholder="Légende, question et hashtags…">${p(c.caption)}</textarea></label>
-          <p class="small muted"><span id="social-count">${c.caption.length}</span>/2200 · ${(c.caption.match(/#[\p{L}\p{N}_]+/gu) || []).length}/30 hashtags${m?.is_synthetic ? ' · la mention #CréatriceVirtuelle sera ajoutée si absente' : ''}</p>
-          <div class="social-preview">${m ? thumb(m.id, 'is-preview') : '<span class="social-thumb social-thumb-empty is-preview"></span>'}<div><strong>@${p(a?.username || 'compte')}</strong><p id="social-preview-text" class="small">${p(c.caption || 'Ta légende apparaîtra ici.')}</p></div></div>
+          <p class="small muted"><span id="social-count">${c.caption.length}</span>/2200 · ${(c.caption.match(/#[\p{L}\p{N}_]+/gu) || []).length}/30 hashtags${ids.some((id) => mediaById(id)?.is_synthetic) ? ' · la mention #CréatriceVirtuelle sera ajoutée si absente' : ''}</p>
+          <div class="social-preview">${m ? thumb(m.id, 'is-preview') : '<span class="social-thumb social-thumb-empty is-preview"></span>'}<div><strong>${ids.length > 1 ? `${ids.length} photos · ` : ''}@${p(a?.username || 'compte')}</strong><p id="social-preview-text" class="small">${p(c.caption || 'Ta légende apparaîtra ici.')}</p></div></div>
           <div class="social-actions">
-            <button type="button" id="social-save" class="btn-sm" ${!m ? 'disabled' : ''}>${editing ? 'Enregistrer les modifications' : 'Valider en brouillon'}</button>
-            <button type="button" id="social-save-schedule" class="btn-primary" ${!m || prob ? 'disabled' : ''}>Valider et programmer…</button>
+            <button type="button" id="social-save" class="btn-sm" ${!m || !!prob ? 'disabled' : ''}>${editing ? 'Enregistrer les modifications' : 'Valider en brouillon'}</button>
+            <button type="button" id="social-save-schedule" class="btn-primary" ${!m || !!prob ? 'disabled' : ''}>${S.isAdmin ? 'Valider et passer à Buffer' : 'Valider et programmer via Meta…'}</button>
             ${editing ? '<button type="button" id="social-new" class="btn-sm btn-ghost">Nouvelle publication</button>' : ''}
           </div></div></section></div>`;
   }
   const assemble = (v) => [v.text, v.question, (v.hashtags || []).join(' ')].filter(Boolean).join('\n\n');
   function readComposer() { const c = S.composer; c.caption = $('#social-caption')?.value ?? c.caption; c.description = $('#social-description')?.value ?? c.description; c.style = $('#social-style')?.value ?? c.style; c.question = $('#social-question')?.checked ?? c.question; }
   async function saveComposer() {
-    readComposer(); const c = S.composer;
+    readComposer(); const c = S.composer, ids = composerIds();
+    if (!ids.length || ids.length > 20 || new Set(ids).size !== ids.length) throw Error('Choisis 1 à 20 photos différentes');
+    if (ids.some((id) => igProblem(mediaById(id)))) throw Error('Une photo sélectionnée est incompatible avec Instagram');
     if (!c.caption.trim()) throw Error('La légende est vide');
-    const r = c.postId ? await call('update_post', { creator_id: S.creatorId, post_id: c.postId, caption: c.caption }) : await call('create_post', { creator_id: S.creatorId, media_id: c.mediaId, caption: c.caption, caption_style: c.style });
-    c.postId = r.post.id; c.caption = r.post.caption;
+    const r = c.postId
+      ? await call('update_post', { creator_id: S.creatorId, post_id: c.postId, media_id: ids[0], media_ids: ids, caption: c.caption })
+      : await call('create_post', { creator_id: S.creatorId, media_id: ids[0], media_ids: ids, caption: c.caption, caption_style: c.style });
+    c.postId = r.post.id; c.mediaId = r.post.media_id; c.mediaIds = r.post.media_ids?.length ? [...r.post.media_ids] : [...ids]; c.caption = r.post.caption;
     return r.post;
   }
 
@@ -308,7 +347,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
       const send = (allow) => call('schedule_post', { creator_id: S.creatorId, post_id: post.id, account_id: a.id, scheduled_at: at.toISOString(), approved_non_explicit: true, allow_repost: allow });
       try {
         let r; try { r = await send(false); } catch (e) { if (e.data?.needs_repost_confirmation && confirm(e.message)) r = await send(true); else throw e; }
-        d.close(); S.composer = { ...S.composer, mediaId: '', postId: '', caption: '', variants: [] };
+        d.close(); S.composer = newComposer();
         toast(r.scheduler_active ? 'Publication programmée pour le ' + fmtDate(at.toISOString()) : 'Programmée — en attente de l’activation du planificateur');
         S.tab = 'posts'; await refresh();
       } catch (e) { err.textContent = e.message; } finally { busy(go, false); }
@@ -333,7 +372,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
     if (x.external_permalink) act.push(`<a class="btn-sm" href="${p(x.external_permalink)}" target="_blank" rel="noopener noreferrer">Voir sur Instagram</a>`);
     act.push(`<button type="button" class="btn-sm btn-ghost" data-events="${p(x.id)}" aria-expanded="false">Historique</button>`);
     const dateLine = x.state === 'published' ? `Publiée le ${when(x.published_at)}` : x.scheduled_at ? `Prévue le ${when(x.scheduled_at)}` : `Créée le ${when(x.created_at)}`;
-    return `<article class="social-entry">${thumb(x.media_id, 'is-md')}<div class="social-entry-body"><div class="social-entry-top">${pill(x.state)}<strong>${dateLine}</strong></div>
+    return `<article class="social-entry">${thumb(x.media_id, 'is-md')}<div class="social-entry-body"><div class="social-entry-top">${pill(x.state)}<strong>${dateLine}${(x.media_ids || []).length > 1 ? ` · ${x.media_ids.length} photos` : ''}</strong></div>
       <p class="small social-caption">${p(x.caption || '(sans légende)')}</p>
       ${x.last_error && x.state !== 'published' ? `<p class="small ${['failed', 'unknown'].includes(x.state) ? 'social-err' : 'muted'}">${p(x.last_error)}</p>` : ''}
       ${x.state === 'unknown' ? '<p class="small muted">Relais IA vérifie automatiquement le compte. Ne republie pas manuellement avant d’avoir vérifié sur Instagram.</p>' : ''}
@@ -364,9 +403,9 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
     const existing = new Set(b.jobs.map((x) => x.source_post_id));
     const drafts = S.posts.filter((x) => x.state === 'draft' && !existing.has(x.id) && !igProblem(mediaById(x.media_id)));
     const chosen = drafts.find((x) => x.id === b.draftId) || drafts[0] || null;
-    if (chosen && b.draftId !== chosen.id) { b.draftId = chosen.id; b.mediaIds = [chosen.media_id]; b.confirmed = false; }
+    if (chosen && b.draftId !== chosen.id) { b.draftId = chosen.id; b.mediaIds = chosen.media_ids?.length ? [...chosen.media_ids] : [chosen.media_id]; b.confirmed = false; }
     if (!chosen) { b.draftId = ''; b.mediaIds = []; }
-    if (chosen && (b.mediaIds[0] !== chosen.media_id || b.mediaIds.some((id) => igProblem(mediaById(id))))) b.mediaIds = [chosen.media_id];
+    if (chosen && (b.mediaIds[0] !== chosen.media_id || b.mediaIds.some((id) => igProblem(mediaById(id))))) b.mediaIds = chosen.media_ids?.length ? [...chosen.media_ids] : [chosen.media_id];
     const mediaOptions = S.media.filter((m) => m.state === 'ready' && !igProblem(m));
     const defaultTime = new Date(Date.now() + 2 * 60 * 60 * 1000); defaultTime.setMinutes(0, 0, 0);
     const maxTime = new Date(Date.now() + 14 * 86400_000);
@@ -445,11 +484,16 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
       on('[data-preview]', (b) => preview(b.dataset.preview));
       $$('[data-select]').forEach((c) => c.onchange = () => { c.checked ? S.selected.add(c.dataset.select) : S.selected.delete(c.dataset.select); draw(); });
       on('#social-clear-selection', () => { S.selected.clear(); draw(); });
-      on('#social-compose-selected', () => { const id = [...S.selected][0]; S.composer = { ...S.composer, mediaId: id, postId: '', variants: [] }; S.tab = 'compose'; draw(); if (S.selected.size > 1) toast('Une publication = une photo : la première sélection est utilisée'); });
+      on('#social-compose-selected', () => { const ids = [...S.selected].filter((id) => !igProblem(mediaById(id))).slice(0, 20); if (!ids.length) { toast('Sélectionne des images compatibles Instagram', true); return; } S.composer = { ...newComposer(), mediaId: ids[0], mediaIds: ids, showLibrary: false }; S.tab = 'compose'; draw(); if (S.selected.size > 20) toast('20 photos maximum : les autres ne sont pas incluses', true); });
       on('#social-archive-selected', act(async () => { if (!confirm(`Archiver ${S.selected.size} photo(s) ? Elles restent stockées en privé.`)) throw Error('Annulé'); const r = await call('archive_media', { creator_id: S.creatorId, media_ids: [...S.selected] }); S.selected.clear(); toast(`${r.archived} archivée(s)${r.blocked ? `, ${r.blocked} bloquée(s) car programmée(s)` : ''}`); }));
     }
     if (S.tab === 'compose') {
-      on('[data-pick-media]', (b) => { readComposer(); S.composer.mediaId = b.dataset.pickMedia; draw(); });
+      on('[data-compose-add]', (b) => { readComposer(); const ids = composerIds(), id = b.dataset.composeAdd, index = ids.indexOf(id); if (index >= 0) ids.splice(index, 1); else if (ids.length < 20) ids.push(id); else { toast('20 photos maximum', true); return; } S.composer.mediaIds = ids; S.composer.mediaId = ids[0] || ''; draw(); });
+      on('[data-compose-remove]', (b) => { readComposer(); const ids = composerIds().filter((id) => id !== b.dataset.composeRemove); S.composer.mediaIds = ids; S.composer.mediaId = ids[0] || ''; draw(); });
+      const movePhoto = (id, direction) => { readComposer(); const ids = composerIds(), from = ids.indexOf(id), to = from + direction; if (from < 0 || to < 0 || to >= ids.length) return; [ids[from], ids[to]] = [ids[to], ids[from]]; S.composer.mediaIds = ids; S.composer.mediaId = ids[0]; draw(); };
+      on('[data-compose-up]', (b) => movePhoto(b.dataset.composeUp, -1));
+      on('[data-compose-down]', (b) => movePhoto(b.dataset.composeDown, 1));
+      on('#social-toggle-gallery', () => { readComposer(); S.composer.showLibrary = !S.composer.showLibrary; draw(); });
       const cap = $('#social-caption'); if (cap) cap.oninput = () => { S.composer.caption = cap.value; $('#social-count').textContent = cap.value.length; $('#social-preview-text').textContent = cap.value || 'Ta légende apparaîtra ici.'; };
       on('#social-generate', async (b) => {
         readComposer(); const c = S.composer;
@@ -464,14 +508,14 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
       });
       on('[data-use]', (b) => { readComposer(); S.composer.caption = assemble(S.composer.variants[Number(b.dataset.use)]); draw(); $('#social-caption')?.focus(); });
       on('[data-copy]', async (b) => { try { await navigator.clipboard.writeText(assemble(S.composer.variants[Number(b.dataset.copy)])); toast('Copié'); } catch { toast('Copie impossible', true); } });
-      on('#social-save', async (b) => { busy(b, true); try { await saveComposer(); toast('Brouillon enregistré'); S.composer = { ...S.composer, mediaId: '', postId: '', caption: '', variants: [] }; S.tab = 'posts'; S.filter = 'draft'; await refresh(); } catch (e) { fail(e); } finally { busy(b, false); } });
-      on('#social-save-schedule', async (b) => { busy(b, true); try { const post = await saveComposer(); await loadData(); draw(); scheduleDialog(post); } catch (e) { fail(e); } finally { busy(b, false); } });
-      on('#social-new', () => { S.composer = { ...S.composer, mediaId: '', postId: '', caption: '', variants: [] }; draw(); });
+      on('#social-save', async (b) => { busy(b, true); try { await saveComposer(); toast('Brouillon enregistré avec ' + composerIds().length + ' photo(s)'); S.composer = newComposer(); S.selected.clear(); S.tab = 'posts'; S.filter = 'draft'; await refresh(); } catch (e) { fail(e); } finally { busy(b, false); } });
+      on('#social-save-schedule', async (b) => { busy(b, true); try { const post = await saveComposer(); await loadData(); if (S.isAdmin) { S.buffer.draftId = post.id; S.buffer.mediaIds = post.media_ids?.length ? [...post.media_ids] : [post.media_id]; S.buffer.confirmed = false; S.tab = 'buffer'; await loadBuffer(); S.selected.clear(); S.composer = newComposer(); draw(); toast('Brouillon prêt pour Buffer : vérifie les photos et l’heure avant de programmer.'); } else { if ((post.media_ids || []).length > 1) throw Error('Pour un carrousel, utilise Buffer'); draw(); scheduleDialog(post); } } catch (e) { fail(e); } finally { busy(b, false); } });
+      on('#social-new', () => { S.composer = newComposer(); draw(); });
     }
     if (S.tab === 'posts') {
       on('[data-filter]', (b) => { S.filter = b.dataset.filter; draw(); });
       on('#social-reload', act(async () => { }));
-      on('[data-edit]', (b) => { const x = S.posts.find((y) => y.id === b.dataset.edit); S.composer = { ...S.composer, mediaId: x.media_id, postId: x.id, caption: x.caption, variants: [], style: x.caption_style || S.composer.style }; S.tab = 'compose'; draw(); });
+      on('[data-edit]', (b) => { const x = S.posts.find((y) => y.id === b.dataset.edit); S.composer = { ...newComposer(), mediaId: x.media_id, mediaIds: x.media_ids?.length ? [...x.media_ids] : [x.media_id], showLibrary: false, postId: x.id, caption: x.caption, style: x.caption_style || 'naturel' }; S.tab = 'compose'; draw(); });
       on('[data-schedule]', (b) => scheduleDialog(S.posts.find((y) => y.id === b.dataset.schedule)));
       on('[data-unschedule]', act((b) => call('unschedule_post', { creator_id: S.creatorId, post_id: b.dataset.unschedule }), 'Remise en brouillon'));
       on('[data-cancel]', act(async (b) => { if (!confirm('Annuler cette publication ?')) throw Error('Annulé'); await call('cancel_post', { creator_id: S.creatorId, post_id: b.dataset.cancel }); }, 'Publication annulée'));
@@ -490,7 +534,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
       const draftSelect = $('#buffer-draft'); if (draftSelect) draftSelect.onchange = () => {
         S.buffer.draftId = draftSelect.value;
         const draft = S.posts.find((x) => x.id === S.buffer.draftId);
-        S.buffer.mediaIds = draft ? [draft.media_id] : [];
+        S.buffer.mediaIds = draft ? (draft.media_ids?.length ? [...draft.media_ids] : [draft.media_id]) : [];
         S.buffer.dateValue = $('#buffer-when')?.value || '';
         S.buffer.confirmed = false;
         draw();

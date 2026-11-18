@@ -26,7 +26,24 @@ const nowIso = () => new Date().toISOString();
 const errMessage = (e: unknown) => e instanceof Error ? e.message : String(e);
 const env = (k: string) => Deno.env.get(k) || '';
 const metaConfigured = () => !!(env('INSTAGRAM_APP_ID') && env('INSTAGRAM_APP_SECRET') && env('SOCIAL_TOKEN_KEY'));
-const POST_FIELDS = 'id,media_id,account_id,caption,caption_style,state,scheduled_at,created_at,updated_at,published_at,external_post_id,external_permalink,last_error,attempts,approved_at,publish_attempted_at';
+const POST_FIELDS = 'id,media_id,media_ids,account_id,caption,caption_style,state,scheduled_at,created_at,updated_at,published_at,external_post_id,external_permalink,last_error,attempts,approved_at,publish_attempted_at';
+// Ordered carousel selection. Always verify ownership and ready state on the server.
+async function validateDraftMedia(userId: string, creatorId: string, coverId: string, requested: unknown) {
+  if (!Array.isArray(requested) || requested.length < 1 || requested.length > 20 || requested[0] !== coverId ||
+      requested.some((id) => !isId(id)) || new Set(requested).size !== requested.length) return null;
+  const { data, error } = await admin.from('social_media')
+    .select('id,is_synthetic,state,mime_type,bytes,width,height')
+    .eq('user_id', userId).eq('creator_id', creatorId).in('id', requested);
+  if (error || !data || data.length !== requested.length) return null;
+  const found = new Map<string, any>(data.map((m: any) => [m.id, m]));
+  const images: any[] = requested.map((id: string) => found.get(id));
+  if (images.some((m) => !m || m.state !== 'ready')) return null;
+  // Buffer carousel cards must be JPEG and Instagram compatible. Preserve legacy one-image Meta behavior.
+  if (images.length > 1 && images.some((m) => m.mime_type !== 'image/jpeg' || m.bytes > 8 * 1024 * 1024 ||
+      !m.width || !m.height || m.width < 320 || m.width / m.height < 0.8 || m.width / m.height > 1.91)) return null;
+  return { ids: requested as string[], synthetic: images.some((m) => m.is_synthetic) };
+}
+
 const ACCOUNT_FIELDS = 'id,creator_id,platform,username,account_type,profile_picture_url,state,permissions,token_expires_at,token_refreshed_at,connected_at,last_error';
 
 async function creatorFor(uid: string, id: string) { const { data, error } = await admin.from('social_creators').select('*').eq('user_id', uid).eq('id', id).maybeSingle(); if (error) throw error; return data; }
@@ -223,22 +240,27 @@ async function postHandler(req: Request) {
       if (!isId(b.media_id)) return bad('Choisis une photo');
       const caption = safeText(b.caption, 2200); if (!caption) return bad('La légende est vide');
       const style = Object.hasOwn(CAPTION_STYLES, String(b.caption_style)) ? String(b.caption_style) : null;
-      const { data: m } = await admin.from('social_media').select('id,is_synthetic').eq('user_id', uid).eq('creator_id', creator).eq('id', b.media_id).eq('state', 'ready').maybeSingle(); if (!m) return bad('Média non disponible');
-      const finalCaption = withTransparency(caption, m.is_synthetic);
-      const { data, error } = await admin.from('social_posts').insert({ user_id: uid, creator_id: creator, media_id: m.id, caption: finalCaption, caption_style: style, state: 'draft' }).select(POST_FIELDS).single(); if (error) throw error;
+      const selection = await validateDraftMedia(uid, creator, b.media_id, b.media_ids === undefined ? [b.media_id] : b.media_ids);
+      if (!selection) return bad('Sélection invalide : 1 à 20 photos du créateur, JPEG compatibles pour un carrousel');
+      const finalCaption = withTransparency(caption, selection.synthetic);
+      const { data, error } = await admin.from('social_posts').insert({ user_id: uid, creator_id: creator, media_id: selection.ids[0], media_ids: selection.ids, caption: finalCaption, caption_style: style, state: 'draft' }).select(POST_FIELDS).single(); if (error) throw error;
       await event(uid, data.id, 'draft_created');
       return result({ post: data });
     }
     if (action === 'update_post') {
       if (!isId(b.post_id)) return bad('Brouillon invalide');
-      const { data: original } = await admin.from('social_posts').select('media_id').eq('id', b.post_id).eq('user_id', uid).eq('creator_id', creator).eq('state', 'draft').maybeSingle();
+      const { data: original } = await admin.from('social_posts').select('media_id,media_ids').eq('id', b.post_id).eq('user_id', uid).eq('creator_id', creator).eq('state', 'draft').maybeSingle();
       if (!original) return bad('Seuls les brouillons peuvent être modifiés');
-      const { data: mediaItem } = await admin.from('social_media').select('is_synthetic').eq('id', original.media_id).eq('user_id', uid).maybeSingle();
+      const coverId = b.media_id === undefined ? original.media_id : b.media_id;
+      if (!isId(coverId)) return bad('Photo de couverture invalide');
+      const selected = b.media_ids === undefined ? (original.media_ids?.length ? original.media_ids : [coverId]) : b.media_ids;
+      const selection = await validateDraftMedia(uid, creator, coverId, selected);
+      if (!selection) return bad('Sélection invalide : 1 à 20 photos du créateur, JPEG compatibles pour un carrousel');
       const caption = safeText(b.caption, 2200); if (!caption) return bad('La légende est vide');
-      const { data: p, error } = await admin.from('social_posts').update({ caption: withTransparency(caption, !!mediaItem?.is_synthetic), updated_at: nowIso() }).eq('id', b.post_id).eq('user_id', uid).eq('creator_id', creator).eq('state', 'draft').select(POST_FIELDS).maybeSingle();
+      const { data: p, error } = await admin.from('social_posts').update({ media_id: selection.ids[0], media_ids: selection.ids, caption: withTransparency(caption, selection.synthetic), updated_at: nowIso() }).eq('id', b.post_id).eq('user_id', uid).eq('creator_id', creator).eq('state', 'draft').select(POST_FIELDS).maybeSingle();
       if (error) throw error; if (!p) return bad('Seuls les brouillons peuvent être modifiés'); return result({ post: p });
     }
-    if (action === 'schedule_post') {
+        if (action === 'schedule_post') {
       if (!isId(b.post_id) || !isId(b.account_id)) return bad('Identifiants invalides');
       if (b.approved_non_explicit !== true) return bad('Confirme que le contenu est non explicite et conforme aux règles d’Instagram');
       const at = new Date(String(b.scheduled_at || ''));
@@ -248,7 +270,8 @@ async function postHandler(req: Request) {
       if (!account || account.platform !== 'instagram' || account.state !== 'connected' || !account.encrypted_token) return bad('Connecte un compte Instagram professionnel avant de programmer');
       if (!account.permissions?.includes('instagram_business_content_publish')) return bad('Permission de publication non accordée : reconnecte Instagram');
       if (!account.token_expires_at || Date.parse(account.token_expires_at) < at.getTime() && Date.parse(account.token_expires_at) < Date.now() + 864e5) return bad('Token Instagram bientôt expiré : reconnecte le compte');
-      const { data: post } = await admin.from('social_posts').select('id,media_id,caption').eq('user_id', uid).eq('creator_id', creator).eq('id', b.post_id).eq('state', 'draft').maybeSingle(); if (!post) return bad('Brouillon introuvable');
+      const { data: post } = await admin.from('social_posts').select('id,media_id,media_ids,caption').eq('user_id', uid).eq('creator_id', creator).eq('id', b.post_id).eq('state', 'draft').maybeSingle(); if (!post) return bad('Brouillon introuvable');
+      if ((post.media_ids || []).length > 1) return bad('Carrousel : utilise Buffer, pas le planificateur Meta');
       const { data: m } = await admin.from('social_media').select('mime_type,state,bytes,width,height').eq('user_id', uid).eq('creator_id', creator).eq('id', post.media_id).maybeSingle();
       if (m?.state !== 'ready') return bad('Média indisponible');
       const problem = instagramImageProblem(m); if (problem) return bad(problem);
@@ -274,9 +297,9 @@ async function postHandler(req: Request) {
     }
     if (action === 'duplicate_post') {
       if (!isId(b.post_id)) return bad('ID invalide');
-      const { data: p } = await admin.from('social_posts').select('media_id,caption,caption_style,state').eq('id', b.post_id).eq('user_id', uid).eq('creator_id', creator).in('state', ['failed', 'cancelled', 'published']).maybeSingle();
+      const { data: p } = await admin.from('social_posts').select('media_id,media_ids,caption,caption_style,state').eq('id', b.post_id).eq('user_id', uid).eq('creator_id', creator).in('state', ['failed', 'cancelled', 'published']).maybeSingle();
       if (!p) return bad('Seules les publications terminées peuvent être dupliquées');
-      const { data, error } = await admin.from('social_posts').insert({ user_id: uid, creator_id: creator, media_id: p.media_id, caption: p.caption, caption_style: p.caption_style, state: 'draft' }).select(POST_FIELDS).single(); if (error) throw error;
+      const { data, error } = await admin.from('social_posts').insert({ user_id: uid, creator_id: creator, media_id: p.media_id, media_ids: p.media_ids?.length ? p.media_ids : [p.media_id], caption: p.caption, caption_style: p.caption_style, state: 'draft' }).select(POST_FIELDS).single(); if (error) throw error;
       await event(uid, data.id, 'draft_created', 'copie de ' + b.post_id); return result({ post: data });
     }
     if (action === 'recheck_post') {
