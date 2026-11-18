@@ -286,7 +286,7 @@ export async function viewSocialAutomation(main, { sb, esc, toast, fail, fmtDate
         ${prob ? `<p class="small social-err">Photo incompatible : ${p(prob)}. Retire-la ou réimporte-la avec l’option de compatibilité Instagram.</p>` : ''}
         <h2 class="social-h2">2. Légende créée par l’IA</h2>
         <div class="social-form">
-          ${S.vision ? `<p class="small muted">L’IA analyse les photos sélectionnées et prépare automatiquement une légende et des hashtags. Les images choisies sont transmises à Google Gemini pour cette analyse, mais rien n’est publié sans validation.</p>` : `<p class="small muted">Pour analyser réellement les images, ajoute une clé GEMINI_API_KEY aux secrets Supabase. En attendant, NoTrack peut rédiger à partir de ta description.</p>`}
+          ${S.vision ? `<p class="small muted">L’IA analyse les photos sélectionnées et prépare automatiquement une légende et des hashtags. Les images choisies sont transmises à Groq pour cette analyse, mais rien n’est publié sans validation.</p>` : `<p class="small muted">Pour analyser réellement les images, ajoute une clé GROQ_API_KEY aux secrets Supabase. En attendant, tu peux rédiger manuellement ou utiliser NoTrack avec une description.</p>`}
           <label>Précisions facultatives pour l’IA <input id="social-description" maxlength="500" value="${p(c.description || '')}" placeholder="Facultatif : ambiance, idée à transmettre, contexte…"></label>
           ${c.visualStatus === 'loading' ? '<p class="small muted" role="status">Analyse des photos et création des légendes en cours…</p>' : ''}
           ${c.visualStatus === 'done' ? '<p class="small social-ok" role="status">Légende générée automatiquement. Tu peux la modifier avant validation.</p>' : ''}

@@ -145,7 +145,7 @@ async function postHandler(req: Request) {
       ]);
       if (creators.error || accounts.error) throw creators.error || accounts.error;
       return result({
-        creators: creators.data, accounts: accounts.data, instagram_configured: metaConfigured(), ai_configured: !!env('NOTRACK_API_KEY'), vision_configured: !!env('GEMINI_API_KEY'),
+        creators: creators.data, accounts: accounts.data, instagram_configured: metaConfigured(), ai_configured: !!env('NOTRACK_API_KEY'), vision_configured: !!env('GROQ_API_KEY'),
         scheduler: sched.data ?? { exists: false, active: false }, is_admin: !!profile.data?.is_admin, redirect_uri: REDIRECT, graph_version: GRAPH_VERSION,
       });
     }
@@ -342,8 +342,8 @@ async function postHandler(req: Request) {
     }
     // Vision API is strictly opt-in: the secret never leaves the Edge Function.
     if (action === 'generate_visual_captions') {
-      const geminiKey = env('GEMINI_API_KEY');
-      if (!geminiKey) return bad('Analyse visuelle non configurée : ajoute GEMINI_API_KEY dans les secrets Supabase', 503);
+      const groqKey = env('GROQ_API_KEY');
+      if (!groqKey) return bad('Analyse visuelle non configurée : ajoute GROQ_API_KEY dans les secrets Supabase', 503);
       const ids: unknown = b.media_ids;
       if (!Array.isArray(ids) || ids.length < 1 || ids.length > 20 || ids.some((id) => !isId(id)) || new Set(ids).size !== ids.length) return bad('Choisis 1 à 20 photos différentes');
       const styleKey = String(b.style || 'naturel');
@@ -355,11 +355,11 @@ async function postHandler(req: Request) {
       if (mediaError || !allMedia || allMedia.length !== ids.length || allMedia.some((m) => m.state !== 'ready')) return bad('Photos introuvables ou indisponibles');
       const mediaMap = new Map<string, any>(allMedia.map((m: any) => [m.id, m]));
       // Analyze a representative subset for lengthy carousels, without giving the provider public URLs.
-      const imageIndexes = Array.from(new Set([0, Math.round((ids.length - 1) / 3), Math.round((ids.length - 1) * 2 / 3), ids.length - 1]));
+      const imageIndexes = Array.from(new Set([0, Math.floor((ids.length - 1) / 2), ids.length - 1]));
       const analyzed = imageIndexes.map((i) => mediaMap.get(ids[i]));
       if (analyzed.some((m) => !m || !['image/jpeg', 'image/png', 'image/webp'].includes(m.mime_type) || m.bytes > 2 * 1024 * 1024))
         return bad('Analyse visuelle : une photo dépasse 2 Mo. Réimporte-la en version optimisée ou saisis une légende manuellement.');
-      const parts: any[] = [{ text: [
+      const parts: any[] = [{ type: 'text', text: [
         'Tu rédiges des légendes Instagram en français pour une créatrice virtuelle : ' + safeText((await creatorFor(uid, creator))?.name || 'Créatrice virtuelle', 100) + '.',
         'Tu peux observer les ' + analyzed.length + ' photos jointes du carrousel de ' + ids.length + ' photos (dans cet ordre). Ne décris pas les photos non jointes.',
         'Décris seulement les éléments réellement visibles. N’invente ni ville, ni lieu, ni marque, ni date, ni sentiments personnels non observables.',
@@ -376,28 +376,30 @@ async function postHandler(req: Request) {
         if (blobError || !blob) return bad('Impossible de lire une photo pour l’analyse visuelle', 502);
         const bytes = new Uint8Array(await blob.arrayBuffer());
         if (bytes.byteLength > 2 * 1024 * 1024) return bad('Image trop volumineuse pour l’analyse visuelle', 413);
-        parts.push({ inline_data: { mime_type: item.mime_type, data: base64Bytes(bytes) } });
+        parts.push({ type: 'image_url', image_url: { url: 'data:' + item.mime_type + ';base64,' + base64Bytes(bytes) } });
       }
-      const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
-        headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
+        headers: { Authorization: 'Bearer ' + groqKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ role: 'user', parts }],
-          generationConfig: { temperature: 0.85, responseMimeType: 'application/json', maxOutputTokens: 1800 },
+          model: 'qwen/qwen3.8-27b',
+          messages: [{ role: 'user', content: parts }],
+          reasoning_effort: 'none', response_format: { type: 'json_object' },
+          temperature: 0.7, max_completion_tokens: 1500, stream: false,
         }),
         signal: AbortSignal.timeout(45000),
       });
       if (!response.ok) {
-        if (response.status === 400 || response.status === 401 || response.status === 403) return bad('Clé Gemini invalide ou accès au modèle refusé : vérifie GEMINI_API_KEY', 503);
-        if (response.status === 429) return bad('Limite Gemini atteinte, réessaie plus tard', 429);
-        return bad('Analyse visuelle temporairement indisponible (' + response.status + ')', 503);
+        if ([401, 403].includes(response.status)) return bad('Clé Groq invalide ou révoquée : vérifie GROQ_API_KEY', 503);
+        if (response.status === 429) return bad('Quota gratuit Groq atteint : réessaie plus tard', 429);
+        return bad('Analyse Groq indisponible (HTTP ' + response.status + ')', 503);
       }
       const body = await response.json().catch(() => null);
-      const raw = (body?.candidates?.[0]?.content?.parts || []).map((p: any) => p?.text || '').join('').trim();
+      const raw = String(body?.choices?.[0]?.message?.content || '');
       let variants;
-      try { variants = parseCaptionVariants(raw); } catch { return bad('Gemini a renvoyé une légende dans un format invalide, régénère', 502); }
-      if (!variants.length) return bad('Gemini n’a pas généré de légende exploitable, régénère', 502);
-      return result({ variants, style: styleKey, images_analyzed: analyzed.length, image_count: ids.length });
+      try { variants = parseCaptionVariants(raw); } catch { return bad('Groq a renvoyé une légende dans un format invalide, régénère', 502); }
+      if (!variants.length) return bad('Groq n’a pas généré de légende exploitable, régénère', 502);
+      return result({ variants: variants.map((v: any) => ({ ...v, hashtags: (v.hashtags || []).slice(0, 5) })), style: styleKey, images_analyzed: analyzed.length, image_count: ids.length, provider: 'groq' });
     }
     if (action === 'generate_captions') {
       const description = safeText(b.description, 500), styleKey = String(b.style || '');
